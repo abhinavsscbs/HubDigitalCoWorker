@@ -3,7 +3,6 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Send,
   MessageSquare,
-  Languages,
   Trash2,
   Download,
   FileText,
@@ -18,13 +17,15 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import './App.css';
 
-const API_BASE_URL = 'http://127.0.0.1:3000/api';
-const SESSION_ID = 'user_session_' + Math.random().toString(36).substr(2, 9);
+const API_BASE_URL = '/api';
+const BASIC_USER = import.meta.env.VITE_BASIC_USER || '';
+const BASIC_PASS = import.meta.env.VITE_BASIC_PASS || '';
 
 function App() {
   const [question, setQuestion] = useState('');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [statusPromptId, setStatusPromptId] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [expandedSources, setExpandedSources] = useState({});
@@ -36,31 +37,59 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  useEffect(() => {
-    if (username.trim() && email.trim()) {
-      fetchHistory();
-    }
-  }, [username, email]);
-
-  const fetchHistory = async () => {
-    if (!username.trim() || !email.trim()) return;
+  const getUserId = () => {
     const userId = `${username.trim().toLowerCase()}::${email
       .trim()
       .toLowerCase()}`;
-    try {
-      const response = await fetch(
-        `${API_BASE_URL}/history?user_id=${encodeURIComponent(
-          userId
-        )}&username=${encodeURIComponent(
-          username.trim()
-        )}&email=${encodeURIComponent(email.trim())}`
+    return userId;
+  };
+
+  const buildAuthHeader = () => {
+    if (!BASIC_USER || !BASIC_PASS) {
+      throw new Error(
+        'Missing VITE_BASIC_USER or VITE_BASIC_PASS in frontend/.env.local'
       );
-      const data = await response.json();
-      if (data.success) {
-        setChatHistory(data.data);
-      }
-    } catch (error) {
-      console.error('Error fetching history:', error);
+    }
+    const token = btoa(`${BASIC_USER}:${BASIC_PASS}`);
+    return { Authorization: `Basic ${token}` };
+  };
+
+  const toChatEntry = (apiData, askedQuestion, serviceLabel) => {
+    const tableHeaders =
+      apiData.promptResponseTabularData?.headers || [];
+    const tableRows = apiData.promptResponseTabularData?.rows || [];
+    const hasTabular = tableHeaders.length > 0 && tableRows.length > 0;
+
+    return {
+      promptId: apiData.promptId,
+      promptStatus: apiData.promptStatus,
+      promptTitle: apiData.promptTitle,
+      kb: serviceLabel,
+      question: askedQuestion,
+      answer: apiData.promptResponseText || '',
+      is_arabic: false,
+      sources: [],
+      stage_answers: {},
+      time_taken_sec: null,
+      tables: hasTabular
+        ? [
+            {
+              table_name: apiData.promptTitle || 'Tabular Data',
+              columns: tableHeaders,
+              rows: tableRows,
+            },
+          ]
+        : [],
+      table_data: [],
+    };
+  };
+
+  const parseErrorPayload = async (response) => {
+    try {
+      const payload = await response.json();
+      return payload.error || `HTTP ${response.status}`;
+    } catch (_e) {
+      return `HTTP ${response.status}`;
     }
   };
 
@@ -70,110 +99,132 @@ function App() {
       alert('Please enter username and email to continue.');
       return;
     }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
+    const userId = getUserId();
 
     setLoading(true);
     try {
+      const authHeader = buildAuthHeader();
       const response = await fetch(`${API_BASE_URL}/ask`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
         body: JSON.stringify({
-          question: question.trim(),
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
+          userId,
+          promptRequestText: question.trim(),
         }),
       });
 
-      const data = await response.json();
-      if (data.success) {
-        setChatHistory((prev) => [data.data, ...prev]);
-        setQuestion('');
-      } else {
-        alert('Error: ' + data.error);
+      if (!response.ok) {
+        alert(`Ask failed: ${await parseErrorPayload(response)}`);
+        return;
       }
+
+      const data = await response.json();
+      const chatEntry = toChatEntry(data, question.trim(), 'Ask Service');
+      setChatHistory((prev) => [chatEntry, ...prev]);
+      setStatusPromptId(data.promptId);
+      setQuestion('');
     } catch (error) {
       console.error('Error asking question:', error);
-      alert('Failed to get answer. Please try again.');
+      alert(error.message || 'Failed to get answer. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleFollowUp = async () => {
-    if (!question.trim() || loading || chatHistory.length === 0) return;
+    if (!question.trim() || loading) return;
     if (!username.trim() || !email.trim()) {
       alert('Please enter username and email to continue.');
       return;
     }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
+    const userId = getUserId();
+    const referencedPromptId =
+      statusPromptId.trim() || chatHistory[0]?.promptId;
+    if (!referencedPromptId) {
+      alert('No promptId found. Ask at least one question first.');
+      return;
+    }
 
     setLoading(true);
     try {
+      const authHeader = buildAuthHeader();
       const response = await fetch(`${API_BASE_URL}/followup`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
         body: JSON.stringify({
-          question: question.trim(),
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
+          userId,
+          promptId: referencedPromptId,
+          promptRequestText: question.trim(),
         }),
       });
 
-      const data = await response.json();
-      if (data.success) {
-        setChatHistory((prev) => [data.data, ...prev]);
-        setQuestion('');
-      } else {
-        alert('Error: ' + data.error);
+      if (!response.ok) {
+        alert(`Follow-up failed: ${await parseErrorPayload(response)}`);
+        return;
       }
+
+      const data = await response.json();
+      const chatEntry = toChatEntry(data, question.trim(), 'Follow-up Service');
+      setChatHistory((prev) => [chatEntry, ...prev]);
+      setStatusPromptId(data.promptId);
+      setQuestion('');
     } catch (error) {
       console.error('Error with follow-up:', error);
-      alert('Failed to get answer. Please try again.');
+      alert(error.message || 'Failed to get follow-up. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleTranslate = async () => {
-    if (chatHistory.length === 0 || loading) return;
+  const handleCheckStatus = async () => {
+    if (loading) return;
     if (!username.trim() || !email.trim()) {
       alert('Please enter username and email to continue.');
       return;
     }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
+    const userId = getUserId();
+    const promptId = statusPromptId.trim() || chatHistory[0]?.promptId;
+    if (!promptId) {
+      alert('Enter a promptId or ask a question first.');
+      return;
+    }
 
     setLoading(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/translate`, {
+      const authHeader = buildAuthHeader();
+      const response = await fetch(`${API_BASE_URL}/updatestatus`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeader,
+        },
         body: JSON.stringify({
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
+          userId,
+          promptId,
         }),
       });
 
-      const data = await response.json();
-      if (data.success) {
-        setChatHistory((prev) => [data.data, ...prev]);
-      } else {
-        alert(data.error || 'Translation failed');
+      if (!response.ok) {
+        alert(`Status check failed: ${await parseErrorPayload(response)}`);
+        return;
       }
+
+      const data = await response.json();
+      const existingQuestion =
+        chatHistory.find((c) => c.promptId === promptId)?.question ||
+        `Status check for ${promptId}`;
+      const chatEntry = toChatEntry(data, existingQuestion, 'Status Service');
+      setChatHistory((prev) => [chatEntry, ...prev]);
+      setStatusPromptId(data.promptId);
     } catch (error) {
-      console.error('Error translating:', error);
-      alert('Failed to translate. Please try again.');
+      console.error('Error checking status:', error);
+      alert(error.message || 'Failed to check status.');
     } finally {
       setLoading(false);
     }
@@ -181,109 +232,8 @@ function App() {
 
   const handleClear = async () => {
     if (!window.confirm('Clear all chat history?')) return;
-    if (!username.trim() || !email.trim()) {
-      alert('Please enter username and email to continue.');
-      return;
-    }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/clear`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
-        }),
-      });
-
-      const data = await response.json();
-      if (data.success) {
-        setChatHistory([]);
-      }
-    } catch (error) {
-      console.error('Error clearing history:', error);
-    }
-  };
-
-  const handleExportPDF = async () => {
-    if (chatHistory.length === 0) return;
-    if (!username.trim() || !email.trim()) {
-      alert('Please enter username and email to continue.');
-      return;
-    }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/export/pdf`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
-        }),
-      });
-
-      if (response.ok) {
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'ifrs_chat_history.pdf';
-        a.click();
-        window.URL.revokeObjectURL(url);
-      } else {
-        alert('PDF export failed');
-      }
-    } catch (error) {
-      console.error('Error exporting PDF:', error);
-    }
-  };
-
-  const handleExportHTML = async () => {
-    if (chatHistory.length === 0) return;
-    if (!username.trim() || !email.trim()) {
-      alert('Please enter username and email to continue.');
-      return;
-    }
-    const userId = `${username.trim().toLowerCase()}::${email
-      .trim()
-      .toLowerCase()}`;
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/export/html`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: SESSION_ID,
-          user_id: userId,
-          username: username.trim(),
-          email: email.trim(),
-        }),
-      });
-
-      if (response.ok) {
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'ifrs_chat_history.html';
-        a.click();
-        window.URL.revokeObjectURL(url);
-      } else {
-        alert('HTML export failed');
-      }
-    } catch (error) {
-      console.error('Error exporting HTML:', error);
-    }
+    setChatHistory([]);
+    setStatusPromptId('');
   };
 
   const toggleSources = (index) => {
@@ -364,6 +314,14 @@ function App() {
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={loading}
               />
+              <input
+                type="text"
+                className="user-input"
+                placeholder="Prompt ID for status (optional)"
+                value={statusPromptId}
+                onChange={(e) => setStatusPromptId(e.target.value)}
+                disabled={loading}
+              />
             </div>
           </div>
           <div className="sidebar-section">
@@ -372,7 +330,7 @@ function App() {
               {chatHistory.slice(0, 5).map((chat, idx) => (
                 <div key={idx} className="recent-query-item">
                   <MessageSquare size={14} />
-                  <span>{chat.question.substring(0, 50)}...</span>
+                  <span>{(chat.question || '').substring(0, 50)}...</span>
                 </div>
               ))}
               {chatHistory.length === 0 && (
@@ -416,7 +374,11 @@ function App() {
               <motion.button
                 className="btn btn-secondary"
                 onClick={handleFollowUp}
-                disabled={loading || !question.trim() || chatHistory.length === 0}
+                disabled={
+                  loading ||
+                  !question.trim() ||
+                  (!statusPromptId.trim() && chatHistory.length === 0)
+                }
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
               >
@@ -426,35 +388,13 @@ function App() {
 
               <motion.button
                 className="btn btn-secondary"
-                onClick={handleTranslate}
-                disabled={loading || chatHistory.length === 0}
+                onClick={handleCheckStatus}
+                disabled={loading || (!statusPromptId.trim() && chatHistory.length === 0)}
                 whileHover={{ scale: 1.02 }}
                 whileTap={{ scale: 0.98 }}
               >
-                <Languages size={18} />
-                Translate to Arabic
-              </motion.button>
-
-              <motion.button
-                className="btn btn-secondary"
-                onClick={handleExportPDF}
-                disabled={chatHistory.length === 0}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <Download size={18} />
-                Export PDF
-              </motion.button>
-
-              <motion.button
-                className="btn btn-secondary"
-                onClick={handleExportHTML}
-                disabled={chatHistory.length === 0}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-              >
-                <Download size={18} />
-                Export HTML
+                <Clock size={18} />
+                Check Status
               </motion.button>
 
               <motion.button

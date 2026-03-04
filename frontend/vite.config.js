@@ -7,5 +7,13 @@ export default defineConfig({
   server: {
     port: 3000,
     open: true,
+    proxy: {
+      '/api/ask': 'http://127.0.0.1:8001',
+      '/api/followup': 'http://127.0.0.1:8002',
+      '/api/updatestatus': 'http://127.0.0.1:8003',
+      '/health': {
+        target: 'http://127.0.0.1:8001',
+      },
+    },
   },
 })
