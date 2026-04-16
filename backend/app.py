@@ -7,6 +7,7 @@ import os
 import sys
 import uuid
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -108,9 +109,16 @@ def _prompt_payload(chat_entry):
     rows = tabular.get("rows") or []
     tabular_content = {"header": headers, "rows": rows} if headers or rows else None
 
+    prompt_status = chat_entry.get("prompt_status", "Completed")
+    terminal_statuses = {"Completed", "Failed"}
+    is_terminal = prompt_status in terminal_statuses
+
     return {
         "promptId": chat_entry.get("prompt_id"),
-        "promptStatus": chat_entry.get("prompt_status", "Completed"),
+        "promptStatus": prompt_status,
+        # Helps clients poll until a terminal state without imposing a fixed attempt count.
+        "isTerminal": is_terminal,
+        "retryAfterMs": 1500 if not is_terminal else 0,
         "promptTitle": chat_entry.get("prompt_title") or _derive_prompt_title(chat_entry.get("question", "")),
         "promptResponseText": chat_entry.get("answer", ""),
         "promptResponseTabularContent": tabular_content,
@@ -134,6 +142,10 @@ def _prompt_payload(chat_entry):
             "promptRequestText": chat_entry.get("promptRequestText"),
         },
     }
+
+
+def _is_terminal_entry(entry):
+    return (entry or {}).get("prompt_status") in {"Completed", "Failed"}
 
 
 def _prompt_success_response(chat_entry):
@@ -766,6 +778,12 @@ def update_status():
         prompt_id = (data.get("promptId") or "").strip()
         if not prompt_id:
             return jsonify(_prompt_error_response('promptId is required', 400)), 400
+        wait_for_terminal_ms = data.get("waitForTerminalMs", 0)
+        try:
+            wait_for_terminal_ms = int(wait_for_terminal_ms)
+        except (TypeError, ValueError):
+            return jsonify(_prompt_error_response('waitForTerminalMs must be an integer', 400)), 400
+        wait_for_terminal_ms = max(0, min(wait_for_terminal_ms, 60000))
 
         session = get_session(user_id)
         record = None
@@ -777,7 +795,26 @@ def update_status():
         if not record:
             return jsonify(_prompt_error_response('Unknown promptId for userId', 404)), 404
 
-        return jsonify(_prompt_success_response(record)), 200
+        # Optional long-polling mode: block up to waitForTerminalMs for terminal status.
+        if wait_for_terminal_ms > 0 and not _is_terminal_entry(record):
+            deadline = time.monotonic() + (wait_for_terminal_ms / 1000.0)
+            while time.monotonic() < deadline:
+                time.sleep(0.5)
+                session = get_session(user_id)
+                for entry in session.get("chat_history", []):
+                    if entry.get("prompt_id") == prompt_id:
+                        record = entry
+                        break
+                if _is_terminal_entry(record):
+                    break
+
+        body = _prompt_success_response(record)
+        response = jsonify(body)
+        retry_after_ms = ((body.get("payload") or {}).get("retryAfterMs")) or 0
+        if retry_after_ms > 0:
+            # Surface the retry hint at HTTP level for standards-based polling clients.
+            response.headers["Retry-After"] = str(max(1, int(retry_after_ms / 1000)))
+        return response, 200
     except Exception as e:
         traceback.print_exc()
         return jsonify(_prompt_error_response(str(e), 500)), 500
