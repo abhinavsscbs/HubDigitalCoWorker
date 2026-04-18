@@ -83,8 +83,8 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 
 ### 1.3 Function-Level Documentation (Current State + Gap)
 
-- **Current state**: many functions in `engine.py` already include docstrings (e.g., retrieval, filtering, citation mapping, answer pipeline), but coverage is inconsistent and the file is very large (3K+ lines).
-- **`answer.py`** currently only re-exports functions and contains no business logic to comment inline.
+- **Current state**: many functions in `engine.py` already include docstrings (e.g., retrieval, filtering, citation mapping, answer pipeline), but coverage is inconsistent and the file remains large (~2.5K lines after modular extraction).
+- **`answer.py`** now contains confidence contract helpers and orchestration entry points, but orchestration internals still primarily live in `engine.py`.
 - **Gap**: there is no dedicated generated API/function reference document, and not all edge cases are documented consistently in code comments.
 
 **Recommended immediate action**
