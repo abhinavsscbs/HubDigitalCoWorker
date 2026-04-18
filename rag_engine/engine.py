@@ -206,51 +206,6 @@ def retrieve_docs_with_score(
         return docs_with_similarity
 
 # --- Round-bracket source tag helper that the LLM can quote in answers ---
-# def _source_tag(meta: dict, db_label: str) -> str:
-#     if db_label=="EY" or "PwC":
-#         doc = (meta or {}).get("chapter_name") or (meta or {}).get("source") or "Document"
-#     else:
-#         doc = (meta or {}).get("chapter") or (meta or {}).get("source") or "Document"
-#     # Get paragraph number from metadata (NEW - accurate from extraction)
-#     para_num = (meta or {}).get("para_number")
-    
-#     # Build tag with paragraph number if available
-#     if para_num and str(para_num).strip():
-#         return f"({db_label} — {doc} — para {para_num})"
-#     else:
-#         return f"({db_label} — {doc})"
-
-# def _source_tag(meta: dict, db_label: str) -> str:
-#     """Build citation tag that gets prepended to chunks."""
-#     # Get paragraph number from metadata
-#     para_num = (meta or {}).get("para_number")
-    
-#     # For IFRS A/B/C: use chapter field (e.g., ifrs-16-leases)
-#     if db_label in ["IFRS A", "IFRS B", "IFRS C"]:
-#         chapter = (meta or {}).get("chapter") or (meta or {}).get("source") or "Document"
-#         if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#             return f"({db_label} - {chapter} - para {para_num})"
-#         else:
-#             return f"({db_label} - {chapter})"
-    
-#     # For EY/PwC: use chapter_name + header (e.g., "15 - Leases (IFRS 16) - Accounting by lessees")
-#     else:
-#         chapter_name = (meta or {}).get("chapter_name") or (meta or {}).get("source") or "Document"
-#         header = (meta or {}).get("header", "")
-        
-#         if header:
-#             # Full format with header section
-#             if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#                 return f"({db_label} - {chapter_name} - {header} - para {para_num})"
-#             else:
-#                 return f"({db_label} - {chapter_name} - {header})"
-#         else:
-#             # Just chapter name
-#             if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#                 return f"({db_label} - {chapter_name} - para {para_num})"
-#             else:
-#                 return f"({db_label} - {chapter_name})"
-
 def _source_tag(meta: dict, db_label: str) -> str:
     """Build citation tag that gets prepended to chunks."""
     # Get paragraph number from metadata
@@ -398,19 +353,6 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
 
 
-# PARA_ID_RE = re.compile(
-#     r"\b(?:(?:para(?:graph)?s?\s*)?)"
-#     r"("
-#     r"(?:IFRS\s+[A-C])"
-#     r"|(?:EY)"
-#     r"|(?:PWC)"
-#     r"|(?:[A-Z]{0,2}\d+(?:\.\d+){0,3})"
-#     r")"
-#     r"(?:\s*[-–—]\s*(?:[A-Z]{0,2}\d+(?:\.\d+){0,3}))?"
-#     r"\b",
-#     re.IGNORECASE
-# )
-
 PARA_ID_RE = re.compile(
     r"\b(?:(?:para(?:graph)?s?\s*)?)"
     r"("
@@ -464,25 +406,6 @@ def _group_docs_by_source(docs: List[Any]) -> Dict[str, List[Any]]:
         src = _detect_source_name(meta)
         groups[src].append(d)
     return groups
-
-# def _collect_seen_paras_from_docs(docs: List[Any]) -> List[str]:
-#     seen = set()
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         for pid in PARA_ID_RE.findall(txt):
-#             seen.add(pid)
-#         meta = getattr(d, "metadata", {}) or {}
-#         for k in ("para_id", "paragraph", "paragraph_ids", "paras"):
-#             val = meta.get(k)
-#             if isinstance(val, str):
-#                 for pid in PARA_ID_RE.findall(_normalize_dashes(val)):
-#                     seen.add(pid)
-#             elif isinstance(val, (list, tuple)):
-#                 for item in val:
-#                     if isinstance(item, str):
-#                         for pid in PARA_ID_RE.findall(_normalize_dashes(item)):
-#                             seen.add(pid)
-#     return sorted(seen)
 
 def _collect_seen_paras_from_metadata(docs: List[Any]) -> List[str]:
     """
@@ -581,41 +504,6 @@ def _try_coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 LLM_EXTRACTOR = get_llm("extractor")
 
-# _EXTRACTOR_PROMPT = (
-#     "You are a meticulous IFRS/Accounting paragraph selector. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's exact question.\n"
-#     "2) A list of paragraph IDs and accounting references that actually appear in the provided snippets (Seen_Paras).\n"
-#     "   These may include:\n"
-#     "   - Pure IDs (e.g., 6.5.8, B5.4.1)\n"
-#     "   - IDs with prefixes/suffixes (e.g., IFRS 6.5.8, IAS 2.1, paragraphs 5.4.1, 6.5.8 EY)\n"
-#     "   - Standard references (IFRS, IAS, IFRIC, paragraphs, IFRS A/B/C, EY, PwC)\n"
-#     "3) The raw snippets text (Context) for reference.\n\n"
-#     "Rules:\n"
-#     "- Select ONLY paragraph IDs or references that are present in Seen_Paras.\n"
-#     "- If the question includes a range like “paragraphs 6.5.8–6.5.14” or “B5.4.1-B5.4.7”, "
-#     "  include all IDs in that span, BUT only if each exists in Seen_Paras.\n"
-#     "- If a prefix/suffix term (e.g., IFRS, IAS, EY, PwC) appears with a paragraph ID, treat it as one reference (e.g., 'IFRS 6.5.8').\n"
-#     "- If the question refers only to a standard (e.g., 'IAS 16' or 'IFRS B'), include it if it exists in Seen_Paras.\n"
-#     "- Do NOT invent IDs or terms not in Seen_Paras.\n"
-#     "- Output STRICT JSON with this schema and nothing else:\n"
-#     "{{\n"
-#     '  "paragraph_ids": ["<ID1>", "<ID2>", "..."],\n'
-#     '  "reason": "one short sentence"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Seen_Paras:\n{seen_paras}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# def _format_docs_with_ids(docs: List[Any], max_docs: int = 20) -> str:
-#     lines: List[str] = []
-#     for i, d in enumerate(docs[:max_docs], start=1):
-#         text = (getattr(d, "page_content", "") or "").strip()
-#         doc_id = (getattr(d, "metadata", {}) or {}).get("_doc_id", "unknown")
-#         lines.append(f"{i}. <DOC_ID:{doc_id}>\n{text}")
-#     return "\n\n".join(lines)
-
 def _format_docs_with_ids(docs: List[Any], max_docs: int = 40) -> str:
     """
     Format documents with their unique IDs for LLM context.
@@ -665,31 +553,6 @@ def _format_docs_with_ids(docs: List[Any], max_docs: int = 40) -> str:
     
     return "\n\n".join(lines)
 
-# def _format_docs_with_ids(docs: List[Any], max_docs: int = 20) -> str:
-#     """Format documents with their unique IDs for LLM context."""
-#     if not docs:
-#         return "(no snippets)"
-    
-#     lines: List[str] = []
-#     for i, d in enumerate(docs[:max_docs], start=1):
-#         text = (getattr(d, "page_content", "") or "").strip()
-#         doc_id = (getattr(d, "metadata", {}) or {}).get("_doc_id", "unknown")
-#         lines.append(f"{i}. <DOC_ID:{doc_id}>\n{text}")
-#     return "\n\n".join(lines)
-
-# def _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
-#     """Filter docs by their unique IDs."""
-#     print(f"\n{'~'*80}")
-#     print(f"FILTERING: Checking {len(docs)} docs against {len(used_ids)} selected IDs")
-#     if not used_ids:
-#         return []
-    
-#     used_ids_set = set(used_ids)
-#     return [
-#         d for d in docs 
-#         if (d.metadata or {}).get("_doc_id") in used_ids_set
-#     ]
-
 def  _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
     """Filter docs by their unique IDs (simplified logging)."""
     if not used_ids:
@@ -704,58 +567,6 @@ def  _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
             kept.append(d)
 
     return kept
-
-# _EXTRACTOR_PROMPT = (
-#     "You are an IFRS reference extractor. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets, each starting with a tag like (IFRS A – Document – para X) <DOC_ID:abc123>\n\n"
-#     "Rules:\n"
-#     "- Extract the DOC_ID values (like abc123) for ONLY the snippets you would cite in your answer\n"
-#     "- Output format:\n"
-#     "{\n"
-#     '  "doc_ids": ["abc123", "def456", ...],\n'
-#     '  "reason": "one short sentence"\n'
-#     "}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# _EXTRACTOR_PROMPT = (
-#     "You are an IFRS reference extractor. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets, each prefixed with <DOC_ID:abc123> format\n\n"
-#     "Rules:\n"
-#     "- Extract ONLY the DOC_ID values (like abc123, def456, etc.) for the snippets you would cite in your answer\n"
-#     "- Select snippets that directly answer the user's question\n"
-#     "- Output format:\n"
-#     "{{\n"
-#     '  "doc_ids": ["abc123", "def456"],\n'
-#     '  "reason": "one short sentence explaining your selection"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# _EXTRACTOR_PROMPT = (
-#     "You are a meticulous IFRS/Accounting paragraph selector. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets from multiple sources (IFRS A/B/C, EY, PwC), each with <DOC_ID:abc123> format\n\n"
-#     "Your task:\n"
-#     "- Select ALL snippets that contain information RELEVANT to answering the question\n"
-#     "- Include snippets from DIFFERENT sources (IFRS A, B, C, EY, PwC) if they provide relevant perspectives\n"
-#     "- Be INCLUSIVE rather than selective - when in doubt, include it\n"
-#     "- A snippet is relevant if it discusses concepts, definitions, requirements, examples, or guidance related to the question\n\n"
-#     "Output format:\n"
-#     "{{\n"
-#     '  "doc_ids": ["abc123", "def456", "xyz789", ...],\n'
-#     '  "reason": "brief explanation of what information these snippets provide"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
 
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
@@ -1358,48 +1169,6 @@ def _parse_extractor_json(raw: str) -> Dict[str, Any]:
             pass
     return {"doc_ids": [], "reason": "Could not parse"}
 
-# def _extract_allowed_paras_with_llm(question: str, docs: List[Any]) -> List[str]:
-#     if not docs:
-#         return []
-#     seen_paras = _collect_seen_paras_from_docs(docs)
-#     if not seen_paras:
-#         return []
-#     ctx = _format_docs_round_robin(docs, total_max=20, per_source_cap=5)
-#     msg = _EXTRACTOR_PROMPT.format(
-#         question=_normalize_dashes((question or "").strip()),
-#         seen_paras=", ".join(seen_paras),
-#         context=ctx
-#     )
-#     resp = LLM_EXTRACTOR.invoke([SystemMessage(content="Output STRICT JSON only."), HumanMessage(content=msg)])
-#     parsed = _parse_extractor_json(getattr(resp, "content", "") or "")
-#     picked = sorted(set(parsed.get("paragraph_ids", [])) & set(seen_paras))
-#     return picked
-
-# def _extract_allowed_paras_with_llm(question: str, docs: List[Any]) -> List[str]:
-#     """Extract relevant paragraph references using metadata-based para numbers."""
-#     if not docs:
-#         return []
-    
-#     # Use metadata instead of regex scraping
-#     seen_paras = _collect_seen_paras_from_metadata(docs)
-    
-#     if not seen_paras:
-#         return []
-    
-#     ctx = _format_docs_round_robin(docs, total_max=20, per_source_cap=5)
-#     msg = _EXTRACTOR_PROMPT.format(
-#         question=_normalize_dashes((question or "").strip()),
-#         seen_paras=", ".join(seen_paras),
-#         context=ctx
-#     )
-#     resp = LLM_EXTRACTOR.invoke([
-#         SystemMessage(content="Output STRICT JSON only."), 
-#         HumanMessage(content=msg)
-#     ])
-#     parsed = _parse_extractor_json(getattr(resp, "content", "") or "")
-#     picked = sorted(set(parsed.get("paragraph_ids", [])) & set(seen_paras))
-#     return picked
-
 def _extract_allowed_doc_ids_with_llm(question: str, docs: List[Any]) -> List[str]:
     """Extract relevant document IDs using LLM - returns list of doc_ids."""
     if not docs:
@@ -1497,38 +1266,6 @@ def get_query_relevance_llm(dir_path: str, question: str, score_threshold: float
     reason = (parsed.get("reason") or "").strip()
     return {"label": label, "reason": reason, "db": dir_path}
 
-# def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
-#     if not allowed_paras:
-#         return docs
-#     allowed = set(allowed_paras)
-#     kept = []
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         ids_in_doc = set(PARA_ID_RE.findall(txt))
-#         if ids_in_doc & allowed:
-#             kept.append(d)
-#     return kept if kept else docs
-
-# def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
-#     if not allowed_paras:
-#         return docs
-#     allowed = set(allowed_paras)
-#     kept = []
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         ids_in_doc = set(PARA_ID_RE.findall(txt))
-
-#         # check chapter-level fallback match
-#         meta = d.metadata or {}
-#         chapter = meta.get("chapter_name") or meta.get("chapter") or ""
-#         source_db = meta.get("source_db") or ""
-#         chapter_key = f"{source_db} — {chapter}" if chapter else None
-
-#         if ids_in_doc & allowed or (chapter_key and chapter_key in allowed):
-#             kept.append(d)
-
-#     return kept if kept else docs
-
 def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
     if not allowed_paras:
         return docs
@@ -1613,207 +1350,6 @@ def subset_references(bottom_refs: List[str], used_refs: List[str]) -> List[str]
                     break
     return keep
 
-
-# def answer_with_refine_chain(question: str):
-#     results = []
-#     for cfg in DBS:
-#         s = get_query_relevance_llm(cfg.path, question, k=5)
-#         results.append(s)
-#         print(s)
-#     if any(r["label"] == "relevant" for r in results):
-#         all_docs_in_order: List[Document] = []
-#         offsets: List[int] = []
-#         for cfg in DBS:
-#             docs = fetch_docs(question, cfg)
-#             all_docs_in_order.extend(docs)
-#             offsets.append(len(all_docs_in_order))
-#         allowed_paras: List[str] = _extract_allowed_paras_with_llm(question, all_docs_in_order)
-#         #  Fallback: if no explicit paragraph IDs detected, use chapter/source metadata
-#         if not allowed_paras:
-#             allowed_paras = []
-#             for d in all_docs_in_order:
-#                 meta = d.metadata or {}
-#                 chapter = meta.get("chapter_name") or meta.get("chapter") or ""
-#                 source_db = meta.get("source_db") or ""
-#                 if chapter:
-#                     allowed_paras.append(f"{source_db} — {chapter}")
-#             allowed_paras = sorted(set(allowed_paras))  # dedupe
-#         filtered_docs = _filter_docs_by_paras(all_docs_in_order, allowed_paras)
-
-#         refine_chain = load_summarize_chain(
-#             LLM,
-#             chain_type="stuff",
-#             prompt=stuff_prompt_normal,
-#             verbose=True,
-#         )
-#         out = refine_chain.invoke({
-#             "input_documents": filtered_docs,
-#             "question": question,
-#         })
-#         final_answer: str = out.get("output_text", "")
-#         if 'allowed_paras' in locals():
-#             final_answer = f"{final_answer}\n\n**References used:** " + (", ".join(allowed_paras) if allowed_paras else "None observed.")
-#         inter: List[str] = out.get("intermediate_steps", []) or []
-#         stage_answers: Dict[str, str] = {}
-#         if len(offsets) >= 1 and len(inter) >= offsets[0]:
-#             stage_answers["STAGE 1 (A)"] = inter[offsets[0]-1]
-#         if len(offsets) >= 2 and len(inter) >= offsets[1]:
-#             stage_answers["STAGE 2 (A+B)"] = inter[offsets[1]-1]
-#         if len(offsets) >= 3 and len(inter) >= offsets[2]:
-#             stage_answers["STAGE 3 (A+B+C)"] = inter[offsets[2]-1]
-#         if len(offsets) >= 4 and len(inter) >= offsets[3]:
-#             stage_answers["STAGE 4 (A+B+C+EY)"] = inter[offsets[3]-1]
-#         return {
-#             "answer": final_answer,
-#             "stage_answers": stage_answers,
-#             "sources": filtered_docs,
-#             "offsets": offsets,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": False,
-#             "prompt_used": "NORMAL",
-#         }
-#     else:
-#         return {
-#             "answer": "I DON'T KNOW",
-#             "stage_answers": None,
-#             "sources": None,
-#             "offsets": None,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": True,
-#             "prompt_used": "OOC",
-#         }
-
-# def answer_with_refine_chain(question: str):
-#     # Check relevance across all DBs
-#     results = []
-#     for cfg in DBS:
-#         s = get_query_relevance_llm(cfg.path, question, k=5)
-#         results.append(s)
-#         print(s)
-    
-#     if any(r["label"] == "relevant" for r in results):
-#         # Fetch all docs with unique IDs
-#         all_docs_in_order: List[Document] = []
-#         offsets: List[int] = []
-        
-#         for cfg in DBS:
-#             docs = fetch_docs(question, cfg)  # Now includes _doc_id in metadata
-#             all_docs_in_order.extend(docs)
-#             offsets.append(len(all_docs_in_order))
-
-#         #  ADD THIS PRINT
-#         print(f"\n{'#'*80}")
-#         print(f" TOTAL DOCS FETCHED: {len(all_docs_in_order)}")
-#         db_counts = {}
-#         for doc in all_docs_in_order:
-#             db = (doc.metadata or {}).get('source_db', 'Unknown')
-#             db_counts[db] = db_counts.get(db, 0) + 1
-#         for db, count in db_counts.items():
-#             print(f"  - {db}: {count} chunks")
-#         print(f"{'#'*80}\n")
-        
-#         #  Extract relevant doc IDs using LLM (replaces paragraph extraction)
-#         used_doc_ids: List[str] = _extract_allowed_doc_ids_with_llm(question, all_docs_in_order)
-        
-#         #  Filter docs strictly by doc IDs (no fallbacks!)
-#         filtered_docs = _filter_docs_by_ids(all_docs_in_order, used_doc_ids)
-        
-#         # If no docs matched, return a clear message
-#         if not filtered_docs:
-#             return {
-#                 "answer": "I couldn't identify specific relevant references for this question.",
-#                 "stage_answers": {},
-#                 "sources": [],
-#                 "offsets": offsets,
-#                 "thresholds": None,
-#                 "scores": None,
-#                 "ooc_mode": False,
-#                 "prompt_used": "NORMAL",
-#             }
-        
-#         # Generate answer using filtered docs
-#         refine_chain = load_summarize_chain(
-#             LLM,
-#             chain_type="stuff",
-#             prompt=stuff_prompt_normal,
-#             verbose=True,
-#         )
-        
-#         out = refine_chain.invoke({
-#             "input_documents": filtered_docs,
-#             "question": question,
-#         })
-        
-#         final_answer: str = out.get("output_text", "")
-        
-#         #  Build "References used" section from actual metadata
-#         refs_used = []
-#         for doc in filtered_docs:
-#             meta = doc.metadata or {}
-#             para_num = meta.get("para_number", "")
-#             chapter = meta.get("chapter_name") or meta.get("chapter", "")
-#             source_db = meta.get("source_db", "")
-#             header = meta.get("header", "")
-            
-#             # For IFRS A, B, C: use paragraph number
-#             if source_db in ["IFRS A", "IFRS B", "IFRS C"]:
-#                 if para_num and str(para_num).lower() not in {"none", "unnumbered", ""}:
-#                     refs_used.append(f"{source_db} – {chapter} – para {para_num}")
-#                 elif chapter:
-#                     refs_used.append(f"{source_db} – {chapter}")
-#             # For EY and PwC: use header
-#             elif source_db in ["EY", "PwC"]:
-#                 if header:
-#                     refs_used.append(f"{source_db} – {chapter} – {header}")
-#                 elif chapter:
-#                     refs_used.append(f"{source_db} – {chapter}")
-
-#         refs_used = sorted(set(refs_used))  # Deduplicate
-        
-#         if refs_used:
-#             # Format as bulleted list
-#             refs_list = "\n".join([f"- {ref}" for ref in refs_used])
-#             final_answer = f"{final_answer}\n\n**References used:**\n{refs_list}"
-        
-#         # Handle stage answers
-#         inter: List[str] = out.get("intermediate_steps", []) or []
-#         stage_answers: Dict[str, str] = {}
-#         if len(offsets) >= 1 and len(inter) >= offsets[0]:
-#             stage_answers["STAGE 1 (A)"] = inter[offsets[0]-1]
-#         if len(offsets) >= 2 and len(inter) >= offsets[1]:
-#             stage_answers["STAGE 2 (A+B)"] = inter[offsets[1]-1]
-#         if len(offsets) >= 3 and len(inter) >= offsets[2]:
-#             stage_answers["STAGE 3 (A+B+C)"] = inter[offsets[2]-1]
-#         if len(offsets) >= 4 and len(inter) >= offsets[3]:
-#             stage_answers["STAGE 4 (A+B+C+EY)"] = inter[offsets[3]-1]
-        
-#         return {
-#             "answer": final_answer,
-#             "stage_answers": stage_answers,
-#             "sources": filtered_docs,  #  Only the docs that were actually used
-#             "offsets": offsets,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": False,
-#             "prompt_used": "NORMAL",
-#         }
-#     else:
-#         return {
-#             "answer": "I DON'T KNOW",
-#             "stage_answers": None,
-#             "sources": None,
-#             "offsets": None,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": True,
-#             "prompt_used": "OOC",
-#         }
-
-# ═══════════════════════════════════════════════════════════════════════════
-# New Exception Handling Functions
-# ═══════════════════════════════════════════════════════════════════════════
 
 def extract_citations_from_text(text: str) -> List[str]:
     """
@@ -2405,12 +1941,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         # Final answer (main answer only, WITH citations - will be formatted in UI layer)
         final_answer = answer_text
 
-        # final_answer = strip_inline_citations_with_llm(final_answer)
-
-        # Exception section (WITH citations - will be formatted in UI layer)
         final_exception_section = exception_section if exception_section else ""
-        # final_exception_section = strip_inline_citations_with_llm(final_exception_section)
-
         print(f"Final answer components prepared")
         print(f"  - Main answer: ✓")
         print(f"  - Exception section: {'✓' if exception_section else '✗'}")
