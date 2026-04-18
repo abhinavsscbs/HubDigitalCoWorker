@@ -138,9 +138,15 @@ Key prompt assets in `engine.py`:
 
 ### 2.4 Accuracy & Validation
 
-- No evaluation dataset, benchmark harness, or regression scoring suite exists in repo.
-- No explicit confidence score returned to clients.
-- Validation is currently logic-based (relevance threshold + LLM filtering + citation mapping), not statistically measured.
+- Lightweight evaluation harness now added under `evaluation/` with:
+  - `evaluation/sample_eval_set.jsonl` starter dataset
+  - `evaluation/run_eval.py` report generator
+  - output metrics: lexical completeness rate, source coverage rate, and average confidence score.
+- Confidence score is now returned from the RAG pipeline as `confidence` with:
+  - `score` (0.0–1.0),
+  - `label` (`low|medium|high`),
+  - component breakdown (similarity/citation coverage/source diversity).
+- Validation remains partially logic-based (relevance threshold + LLM filtering + citation mapping), and should still be extended with expert-reviewed benchmarks.
 
 **Recommendation**: create a gold QA set (100-300 curated IFRS questions) and compute retrieval precision@k, groundedness checks, and answer completeness before release.
 
@@ -364,4 +370,3 @@ Outcome: lower cognitive load, easier testing, safer modifications.
   - modularization,
   - deployment standardization (containers + CI/CD).
 - The highest immediate priorities are **security + logging + operational controls**.
-

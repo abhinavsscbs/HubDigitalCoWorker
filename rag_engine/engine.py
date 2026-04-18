@@ -2150,6 +2150,72 @@ def generate_unified_reference_list(
     return f"\n\n**References:**\n\n{references_text}"
 
 
+def _compute_confidence(selected_docs: List[Document], cited_doc_ids: List[str]) -> Dict[str, Any]:
+    """
+    Compute a lightweight confidence score for downstream consumers.
+
+    Components:
+    - similarity_component (50%): mean retrieval similarity of selected docs
+    - citation_coverage_component (30%): cited docs / selected docs
+    - source_diversity_component (20%): represented DB diversity (maxed at 3+ sources)
+    """
+    if not selected_docs:
+        return {
+            "score": 0.0,
+            "label": "low",
+            "components": {
+                "similarity_component": 0.0,
+                "citation_coverage_component": 0.0,
+                "source_diversity_component": 0.0,
+            },
+            "reason": "No supporting documents were selected.",
+        }
+
+    similarity_values: List[float] = []
+    source_dbs = set()
+
+    for doc in selected_docs:
+        meta = getattr(doc, "metadata", {}) or {}
+        sim = meta.get("_similarity_score")
+        if isinstance(sim, (int, float)):
+            similarity_values.append(float(max(0.0, min(1.0, sim))))
+        source_db = meta.get("source_db")
+        if isinstance(source_db, str) and source_db.strip():
+            source_dbs.add(source_db.strip())
+
+    similarity_component = float(np.mean(similarity_values)) if similarity_values else 0.0
+    citation_coverage_component = len(set(cited_doc_ids)) / max(1, len(selected_docs))
+    source_diversity_component = min(1.0, len(source_dbs) / 3.0)
+
+    raw_score = (
+        0.50 * similarity_component
+        + 0.30 * citation_coverage_component
+        + 0.20 * source_diversity_component
+    )
+    score = round(float(max(0.0, min(1.0, raw_score))), 3)
+
+    if score >= 0.75:
+        label = "high"
+    elif score >= 0.50:
+        label = "medium"
+    else:
+        label = "low"
+
+    return {
+        "score": score,
+        "label": label,
+        "components": {
+            "similarity_component": round(similarity_component, 3),
+            "citation_coverage_component": round(citation_coverage_component, 3),
+            "source_diversity_component": round(source_diversity_component, 3),
+        },
+        "reason": (
+            f"Computed from {len(selected_docs)} selected chunks across {len(source_dbs)} source DB(s), "
+            f"with {len(set(cited_doc_ids))} cited chunk(s)."
+        ),
+    }
+
+
 def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
     """
     Main RAG function with 5-DB sequential retrieval and LLM-based filtering.
@@ -2233,6 +2299,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
                 "answer_text": "I couldn't identify specific relevant references for this question.",
                 "tables": [],
                 "exception_section": "",  # No exception section when no docs found
+                "confidence": _compute_confidence([], []),
                 "stage_answers": {},
                 "sources": [],
                 "offsets": offsets,
@@ -2399,11 +2466,14 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         print(f"\n>> The frontend will combine 'answer' and 'exception_section' for display")
         print(f"{'='*80}\n")
 
+        confidence = _compute_confidence(all_available_docs, cited_doc_ids)
+
         return {
             "answer": final_answer,
             "answer_text": final_answer,
             "tables": tables_payload,
             "exception_section": final_exception_section,  # ← Exception section (separate from main answer)
+            "confidence": confidence,
             "stage_answers": stage_answers,
             "sources": display_sources,  # ← âœ… Filtered sources (no page=0)
             "offsets": offsets,
@@ -2420,6 +2490,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
             "answer_text": "I DON'T KNOW",
             "tables": [],
             "exception_section": "",  # No exception section for out-of-context queries
+            "confidence": _compute_confidence([], []),
             "stage_answers": None,
             "sources": None,
             "offsets": None,
