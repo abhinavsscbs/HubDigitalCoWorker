@@ -66,6 +66,8 @@ from rag_engine.tables import (
     _strip_markdown_tables_from_text,
     extract_markdown_tables_as_dfs,
 )
+from rag_engine import retrieval as retrieval_core
+from rag_engine.answer import build_confidence_result
 
 # --- PDF backends (ReportLab preferred, FPDF fallback) ---
 try:
@@ -1969,8 +1971,8 @@ def retrieve_and_generate_exceptions(
         print(f"\nSearching for: {query}")
 
         # Fetch from all 5 databases (same as main answer)
-        for cfg in DBS:
-            docs = fetch_docs(query, cfg)
+        for cfg in retrieval_core.DBS:
+            docs = retrieval_core.fetch_docs(query, cfg)
             all_exception_docs.extend(docs)
             if docs:
                 print(f"  {cfg.name:8} Retrieved {len(docs):2d} docs")
@@ -2160,16 +2162,13 @@ def _compute_confidence(selected_docs: List[Document], cited_doc_ids: List[str])
     - source_diversity_component (20%): represented DB diversity (maxed at 3+ sources)
     """
     if not selected_docs:
-        return {
-            "score": 0.0,
-            "label": "low",
-            "components": {
-                "similarity_component": 0.0,
-                "citation_coverage_component": 0.0,
-                "source_diversity_component": 0.0,
-            },
-            "reason": "No supporting documents were selected.",
-        }
+        return build_confidence_result(
+            score=0.0,
+            similarity_component=0.0,
+            citation_coverage_component=0.0,
+            source_diversity_component=0.0,
+            reason="No supporting documents were selected.",
+        )
 
     similarity_values: List[float] = []
     source_dbs = set()
@@ -2192,28 +2191,17 @@ def _compute_confidence(selected_docs: List[Document], cited_doc_ids: List[str])
         + 0.30 * citation_coverage_component
         + 0.20 * source_diversity_component
     )
-    score = round(float(max(0.0, min(1.0, raw_score))), 3)
-
-    if score >= 0.75:
-        label = "high"
-    elif score >= 0.50:
-        label = "medium"
-    else:
-        label = "low"
-
-    return {
-        "score": score,
-        "label": label,
-        "components": {
-            "similarity_component": round(similarity_component, 3),
-            "citation_coverage_component": round(citation_coverage_component, 3),
-            "source_diversity_component": round(source_diversity_component, 3),
-        },
-        "reason": (
+    score = float(max(0.0, min(1.0, raw_score)))
+    return build_confidence_result(
+        score=score,
+        similarity_component=similarity_component,
+        citation_coverage_component=citation_coverage_component,
+        source_diversity_component=source_diversity_component,
+        reason=(
             f"Computed from {len(selected_docs)} selected chunks across {len(source_dbs)} source DB(s), "
             f"with {len(set(cited_doc_ids))} cited chunk(s)."
         ),
-    }
+    )
 
 
 def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
@@ -2239,7 +2227,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
     print(f"{'='*80}")
 
     results = []
-    for cfg in DBS:
+    for cfg in retrieval_core.DBS:
         s = get_query_relevance_llm(cfg.path, question, score_threshold=STAGE_1_THRESHOLD)
         results.append(s)
         status = "RELEVANT" if s["label"] == "relevant" else "NOT RELEVANT"
@@ -2254,8 +2242,8 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         all_docs_in_order: List[Document] = []
         offsets: List[int] = []
 
-        for cfg in DBS:
-            docs = fetch_docs(question, cfg)  # Now includes _doc_id in metadata
+        for cfg in retrieval_core.DBS:
+            docs = retrieval_core.fetch_docs(question, cfg)  # Now includes _doc_id in metadata
             all_docs_in_order.extend(docs)
             offsets.append(len(all_docs_in_order))
 

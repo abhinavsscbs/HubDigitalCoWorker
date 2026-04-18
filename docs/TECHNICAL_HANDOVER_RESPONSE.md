@@ -60,11 +60,11 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 
 ## `rag_engine/`
 - `engine.py`: core business logic (retrieval, prompts, generation, exception flow, text formatting, PDF/HTML export, translation helpers).
-- `answer.py`: thin re-export facade for answer-related entry points.
-- `retrieval.py`: thin re-export facade for retrieval functions.
-- `formatting.py`: thin re-export facade for formatting utilities.
-- `translate.py`: thin re-export facade for translation entry point.
-- `exports.py`: thin re-export facade for export functions.
+- `answer.py`: answer contract helpers (confidence classification/shape) and lazy orchestration entry points.
+- `retrieval.py`: concrete retrieval module (DB config, FAISS load, similarity conversion, percentile filtering, chunk packaging).
+- `formatting.py`: concrete formatting module (sanitization, citation cleanup, visible-answer formatting, metadata normalization).
+- `translate.py`: translation entry point.
+- `exports.py`: export entry points (PDF/HTML backend integration).
 - `tables.py`: markdown table extraction/normalization/parsing utilities.
 - `llm_client.py`: LLM HTTP client and model factory.
 - `config.py`: YAML + env config loader and typed constants.
@@ -75,7 +75,8 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 
 ### File dependency highlights
 - `backend/app.py` imports from `rag_engine.answer`, `rag_engine.exports`, `rag_engine.formatting`, `rag_engine.tables`, `rag_engine.translate`, `rag_engine.engine`.
-- `rag_engine.answer` and `rag_engine.retrieval` are wrappers over `rag_engine.engine`.
+- `rag_engine.answer` owns confidence-result contract helpers and delegates orchestration entry points.
+- `rag_engine.retrieval` owns FAISS retrieval and document packaging concerns.
 - `rag_engine.engine` depends on `rag_config`/`llm_client` compatibility modules which point back into `rag_engine.config` and `rag_engine.llm_client`.
 
 ---
