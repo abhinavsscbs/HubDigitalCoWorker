@@ -32,11 +32,12 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 ```
 
 **End-to-end data flow**
-1. Client calls `POST /api/ask` with `promptRequestText`/`question` and user context.  
-2. Flask stores a `Thinking` placeholder prompt and executes async processing in `ThreadPoolExecutor`.  
-3. `answer_with_refine_chain()` performs: relevance check → retrieval from all DBs → LLM filtering → answer generation → exception generation → citation/source packaging.  
-4. API updates prompt status (`Completed` or `Failed`) and client polls with `/api/updatestatus`.  
-5. Optional post-processing endpoints: `/api/translate`, `/api/export/pdf`, `/api/export/html`, `/api/export/csv`.
+1. Client calls one of: `POST /api/ask`, `POST /api/followup`, or `POST /api/translate`.  
+2. Flask inserts a `Thinking` prompt entry and schedules background work via `ThreadPoolExecutor`.  
+3. Worker pipeline executes (RAG generation for ask/followup, translation pipeline for translate).  
+4. Prompt entry is updated to terminal state (`Completed` or `Failed`).  
+5. Client polls `POST /api/updatestatus` using `promptId` until terminal (`isTerminal=true`).  
+6. Export endpoints (`/api/export/pdf`, `/api/export/html`, `/api/export/csv`) operate on stored history payloads.
 
 **Major components**
 - **Flask backend**: request handling, session/history management, async prompt lifecycle, export endpoints.  
@@ -53,7 +54,7 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 - `llm_client.py`: compatibility re-export to `rag_engine.llm_client`.
 
 ## `backend/`
-- `app.py`: Flask API app, endpoints, async prompt execution, request/response schema adaptation, history/export/translation orchestration.
+- `app.py`: Flask API app, endpoints, async prompt execution, request/response schema adaptation, polling status contract (`/api/updatestatus`), history/export/translation orchestration.
 - `session_store.py`: Redis-first + filesystem fallback session persistence.
 - `config.yaml`: runtime configuration (RAG paths, thresholds, LLM settings, server/cors/session).
 - `requirements.txt`: Python dependency list.
@@ -91,6 +92,17 @@ Repository scope reviewed: `/workspace/HubDigitalCoWorker`
 1. Split `engine.py` into modules (`retrieval.py`, `prompting.py`, `exceptions.py`, `formatting.py`, `exports.py`, `translation.py`).
 2. Add a strict function docstring template (Purpose/Inputs/Outputs/Edge cases/Raises).
 3. Generate reference docs via `pydoc-markdown` or Sphinx autodoc in CI.
+
+### 1.4 API Execution Contract (Important for Frontend Integration)
+
+All interactive endpoints now follow the same async contract:
+
+1. Call endpoint (`/api/ask`, `/api/followup`, `/api/translate`).
+2. Receive success payload with `promptId` and `promptStatus=Thinking`.
+3. Poll `/api/updatestatus` with the same `promptId`.
+4. Stop polling when `isTerminal=true` (`promptStatus` is `Completed` or `Failed`).
+
+**Operational note**: frontend should not assume synchronous completion for follow-up or translation; both are background worker tasks now.
 
 ---
 
