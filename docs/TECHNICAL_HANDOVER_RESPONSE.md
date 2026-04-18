@@ -155,6 +155,7 @@ Key prompt assets in `engine.py`:
   - `evaluation/sample_eval_set.jsonl` starter dataset
   - `evaluation/run_eval.py` report generator
   - output metrics: lexical completeness rate, source coverage rate, and average confidence score.
+- Evaluation harness is **optional** (offline QA/regression activity) and is **not** required for normal API request processing.
 - Confidence score is now returned from the RAG pipeline as `confidence` with:
   - `score` (0.0–1.0),
   - `label` (`low|medium|high`),

@@ -2,6 +2,9 @@
 
 This folder adds a lightweight baseline to address section **2.4 Accuracy & Validation**.
 
+> **Important:** Evaluation is **optional** and is not part of the runtime request path (`/api/ask`, `/api/followup`, `/api/translate`).  
+> Run it only when you need validation/regression checks.
+
 ## Files
 - `sample_eval_set.jsonl`: starter evaluation dataset format.
 - `run_eval.py`: runs the RAG pipeline for each question and computes baseline metrics.
@@ -17,6 +20,8 @@ python evaluation/run_eval.py \
   --dataset evaluation/sample_eval_set.jsonl \
   --output evaluation/eval_report.json
 ```
+
+This command is for QA/benchmarking workflows and does **not** need to run on every deployment or every API call.
 
 ## Dataset schema (JSONL)
 Each line is one object:
