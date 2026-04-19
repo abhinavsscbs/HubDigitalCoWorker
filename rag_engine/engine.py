@@ -66,6 +66,8 @@ from rag_engine.tables import (
     _strip_markdown_tables_from_text,
     extract_markdown_tables_as_dfs,
 )
+from rag_engine import retrieval as retrieval_core
+from rag_engine.answer import build_confidence_result
 
 # --- PDF backends (ReportLab preferred, FPDF fallback) ---
 try:
@@ -204,51 +206,6 @@ def retrieve_docs_with_score(
         return docs_with_similarity
 
 # --- Round-bracket source tag helper that the LLM can quote in answers ---
-# def _source_tag(meta: dict, db_label: str) -> str:
-#     if db_label=="EY" or "PwC":
-#         doc = (meta or {}).get("chapter_name") or (meta or {}).get("source") or "Document"
-#     else:
-#         doc = (meta or {}).get("chapter") or (meta or {}).get("source") or "Document"
-#     # Get paragraph number from metadata (NEW - accurate from extraction)
-#     para_num = (meta or {}).get("para_number")
-    
-#     # Build tag with paragraph number if available
-#     if para_num and str(para_num).strip():
-#         return f"({db_label} — {doc} — para {para_num})"
-#     else:
-#         return f"({db_label} — {doc})"
-
-# def _source_tag(meta: dict, db_label: str) -> str:
-#     """Build citation tag that gets prepended to chunks."""
-#     # Get paragraph number from metadata
-#     para_num = (meta or {}).get("para_number")
-    
-#     # For IFRS A/B/C: use chapter field (e.g., ifrs-16-leases)
-#     if db_label in ["IFRS A", "IFRS B", "IFRS C"]:
-#         chapter = (meta or {}).get("chapter") or (meta or {}).get("source") or "Document"
-#         if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#             return f"({db_label} - {chapter} - para {para_num})"
-#         else:
-#             return f"({db_label} - {chapter})"
-    
-#     # For EY/PwC: use chapter_name + header (e.g., "15 - Leases (IFRS 16) - Accounting by lessees")
-#     else:
-#         chapter_name = (meta or {}).get("chapter_name") or (meta or {}).get("source") or "Document"
-#         header = (meta or {}).get("header", "")
-        
-#         if header:
-#             # Full format with header section
-#             if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#                 return f"({db_label} - {chapter_name} - {header} - para {para_num})"
-#             else:
-#                 return f"({db_label} - {chapter_name} - {header})"
-#         else:
-#             # Just chapter name
-#             if para_num and str(para_num).strip() and str(para_num).lower() not in {"none", "unnumbered"}:
-#                 return f"({db_label} - {chapter_name} - para {para_num})"
-#             else:
-#                 return f"({db_label} - {chapter_name})"
-
 def _source_tag(meta: dict, db_label: str) -> str:
     """Build citation tag that gets prepended to chunks."""
     # Get paragraph number from metadata
@@ -396,19 +353,6 @@ from langchain_core.prompts import PromptTemplate
 from langchain.chains.summarize import load_summarize_chain
 
 
-# PARA_ID_RE = re.compile(
-#     r"\b(?:(?:para(?:graph)?s?\s*)?)"
-#     r"("
-#     r"(?:IFRS\s+[A-C])"
-#     r"|(?:EY)"
-#     r"|(?:PWC)"
-#     r"|(?:[A-Z]{0,2}\d+(?:\.\d+){0,3})"
-#     r")"
-#     r"(?:\s*[-–—]\s*(?:[A-Z]{0,2}\d+(?:\.\d+){0,3}))?"
-#     r"\b",
-#     re.IGNORECASE
-# )
-
 PARA_ID_RE = re.compile(
     r"\b(?:(?:para(?:graph)?s?\s*)?)"
     r"("
@@ -462,25 +406,6 @@ def _group_docs_by_source(docs: List[Any]) -> Dict[str, List[Any]]:
         src = _detect_source_name(meta)
         groups[src].append(d)
     return groups
-
-# def _collect_seen_paras_from_docs(docs: List[Any]) -> List[str]:
-#     seen = set()
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         for pid in PARA_ID_RE.findall(txt):
-#             seen.add(pid)
-#         meta = getattr(d, "metadata", {}) or {}
-#         for k in ("para_id", "paragraph", "paragraph_ids", "paras"):
-#             val = meta.get(k)
-#             if isinstance(val, str):
-#                 for pid in PARA_ID_RE.findall(_normalize_dashes(val)):
-#                     seen.add(pid)
-#             elif isinstance(val, (list, tuple)):
-#                 for item in val:
-#                     if isinstance(item, str):
-#                         for pid in PARA_ID_RE.findall(_normalize_dashes(item)):
-#                             seen.add(pid)
-#     return sorted(seen)
 
 def _collect_seen_paras_from_metadata(docs: List[Any]) -> List[str]:
     """
@@ -579,41 +504,6 @@ def _try_coerce_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 LLM_EXTRACTOR = get_llm("extractor")
 
-# _EXTRACTOR_PROMPT = (
-#     "You are a meticulous IFRS/Accounting paragraph selector. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's exact question.\n"
-#     "2) A list of paragraph IDs and accounting references that actually appear in the provided snippets (Seen_Paras).\n"
-#     "   These may include:\n"
-#     "   - Pure IDs (e.g., 6.5.8, B5.4.1)\n"
-#     "   - IDs with prefixes/suffixes (e.g., IFRS 6.5.8, IAS 2.1, paragraphs 5.4.1, 6.5.8 EY)\n"
-#     "   - Standard references (IFRS, IAS, IFRIC, paragraphs, IFRS A/B/C, EY, PwC)\n"
-#     "3) The raw snippets text (Context) for reference.\n\n"
-#     "Rules:\n"
-#     "- Select ONLY paragraph IDs or references that are present in Seen_Paras.\n"
-#     "- If the question includes a range like “paragraphs 6.5.8–6.5.14” or “B5.4.1-B5.4.7”, "
-#     "  include all IDs in that span, BUT only if each exists in Seen_Paras.\n"
-#     "- If a prefix/suffix term (e.g., IFRS, IAS, EY, PwC) appears with a paragraph ID, treat it as one reference (e.g., 'IFRS 6.5.8').\n"
-#     "- If the question refers only to a standard (e.g., 'IAS 16' or 'IFRS B'), include it if it exists in Seen_Paras.\n"
-#     "- Do NOT invent IDs or terms not in Seen_Paras.\n"
-#     "- Output STRICT JSON with this schema and nothing else:\n"
-#     "{{\n"
-#     '  "paragraph_ids": ["<ID1>", "<ID2>", "..."],\n'
-#     '  "reason": "one short sentence"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Seen_Paras:\n{seen_paras}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# def _format_docs_with_ids(docs: List[Any], max_docs: int = 20) -> str:
-#     lines: List[str] = []
-#     for i, d in enumerate(docs[:max_docs], start=1):
-#         text = (getattr(d, "page_content", "") or "").strip()
-#         doc_id = (getattr(d, "metadata", {}) or {}).get("_doc_id", "unknown")
-#         lines.append(f"{i}. <DOC_ID:{doc_id}>\n{text}")
-#     return "\n\n".join(lines)
-
 def _format_docs_with_ids(docs: List[Any], max_docs: int = 40) -> str:
     """
     Format documents with their unique IDs for LLM context.
@@ -663,31 +553,6 @@ def _format_docs_with_ids(docs: List[Any], max_docs: int = 40) -> str:
     
     return "\n\n".join(lines)
 
-# def _format_docs_with_ids(docs: List[Any], max_docs: int = 20) -> str:
-#     """Format documents with their unique IDs for LLM context."""
-#     if not docs:
-#         return "(no snippets)"
-    
-#     lines: List[str] = []
-#     for i, d in enumerate(docs[:max_docs], start=1):
-#         text = (getattr(d, "page_content", "") or "").strip()
-#         doc_id = (getattr(d, "metadata", {}) or {}).get("_doc_id", "unknown")
-#         lines.append(f"{i}. <DOC_ID:{doc_id}>\n{text}")
-#     return "\n\n".join(lines)
-
-# def _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
-#     """Filter docs by their unique IDs."""
-#     print(f"\n{'~'*80}")
-#     print(f"FILTERING: Checking {len(docs)} docs against {len(used_ids)} selected IDs")
-#     if not used_ids:
-#         return []
-    
-#     used_ids_set = set(used_ids)
-#     return [
-#         d for d in docs 
-#         if (d.metadata or {}).get("_doc_id") in used_ids_set
-#     ]
-
 def  _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
     """Filter docs by their unique IDs (simplified logging)."""
     if not used_ids:
@@ -702,58 +567,6 @@ def  _filter_docs_by_ids(docs: List[Any], used_ids: List[str]) -> List[Any]:
             kept.append(d)
 
     return kept
-
-# _EXTRACTOR_PROMPT = (
-#     "You are an IFRS reference extractor. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets, each starting with a tag like (IFRS A – Document – para X) <DOC_ID:abc123>\n\n"
-#     "Rules:\n"
-#     "- Extract the DOC_ID values (like abc123) for ONLY the snippets you would cite in your answer\n"
-#     "- Output format:\n"
-#     "{\n"
-#     '  "doc_ids": ["abc123", "def456", ...],\n'
-#     '  "reason": "one short sentence"\n'
-#     "}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# _EXTRACTOR_PROMPT = (
-#     "You are an IFRS reference extractor. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets, each prefixed with <DOC_ID:abc123> format\n\n"
-#     "Rules:\n"
-#     "- Extract ONLY the DOC_ID values (like abc123, def456, etc.) for the snippets you would cite in your answer\n"
-#     "- Select snippets that directly answer the user's question\n"
-#     "- Output format:\n"
-#     "{{\n"
-#     '  "doc_ids": ["abc123", "def456"],\n'
-#     '  "reason": "one short sentence explaining your selection"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
-
-# _EXTRACTOR_PROMPT = (
-#     "You are a meticulous IFRS/Accounting paragraph selector. Output STRICT JSON only.\n\n"
-#     "You receive:\n"
-#     "1) The user's question\n"
-#     "2) Context snippets from multiple sources (IFRS A/B/C, EY, PwC), each with <DOC_ID:abc123> format\n\n"
-#     "Your task:\n"
-#     "- Select ALL snippets that contain information RELEVANT to answering the question\n"
-#     "- Include snippets from DIFFERENT sources (IFRS A, B, C, EY, PwC) if they provide relevant perspectives\n"
-#     "- Be INCLUSIVE rather than selective - when in doubt, include it\n"
-#     "- A snippet is relevant if it discusses concepts, definitions, requirements, examples, or guidance related to the question\n\n"
-#     "Output format:\n"
-#     "{{\n"
-#     '  "doc_ids": ["abc123", "def456", "xyz789", ...],\n'
-#     '  "reason": "brief explanation of what information these snippets provide"\n'
-#     "}}\n\n"
-#     "Question:\n{question}\n\n"
-#     "Context:\n{context}\n"
-# )
 
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
@@ -1356,48 +1169,6 @@ def _parse_extractor_json(raw: str) -> Dict[str, Any]:
             pass
     return {"doc_ids": [], "reason": "Could not parse"}
 
-# def _extract_allowed_paras_with_llm(question: str, docs: List[Any]) -> List[str]:
-#     if not docs:
-#         return []
-#     seen_paras = _collect_seen_paras_from_docs(docs)
-#     if not seen_paras:
-#         return []
-#     ctx = _format_docs_round_robin(docs, total_max=20, per_source_cap=5)
-#     msg = _EXTRACTOR_PROMPT.format(
-#         question=_normalize_dashes((question or "").strip()),
-#         seen_paras=", ".join(seen_paras),
-#         context=ctx
-#     )
-#     resp = LLM_EXTRACTOR.invoke([SystemMessage(content="Output STRICT JSON only."), HumanMessage(content=msg)])
-#     parsed = _parse_extractor_json(getattr(resp, "content", "") or "")
-#     picked = sorted(set(parsed.get("paragraph_ids", [])) & set(seen_paras))
-#     return picked
-
-# def _extract_allowed_paras_with_llm(question: str, docs: List[Any]) -> List[str]:
-#     """Extract relevant paragraph references using metadata-based para numbers."""
-#     if not docs:
-#         return []
-    
-#     # Use metadata instead of regex scraping
-#     seen_paras = _collect_seen_paras_from_metadata(docs)
-    
-#     if not seen_paras:
-#         return []
-    
-#     ctx = _format_docs_round_robin(docs, total_max=20, per_source_cap=5)
-#     msg = _EXTRACTOR_PROMPT.format(
-#         question=_normalize_dashes((question or "").strip()),
-#         seen_paras=", ".join(seen_paras),
-#         context=ctx
-#     )
-#     resp = LLM_EXTRACTOR.invoke([
-#         SystemMessage(content="Output STRICT JSON only."), 
-#         HumanMessage(content=msg)
-#     ])
-#     parsed = _parse_extractor_json(getattr(resp, "content", "") or "")
-#     picked = sorted(set(parsed.get("paragraph_ids", [])) & set(seen_paras))
-#     return picked
-
 def _extract_allowed_doc_ids_with_llm(question: str, docs: List[Any]) -> List[str]:
     """Extract relevant document IDs using LLM - returns list of doc_ids."""
     if not docs:
@@ -1495,38 +1266,6 @@ def get_query_relevance_llm(dir_path: str, question: str, score_threshold: float
     reason = (parsed.get("reason") or "").strip()
     return {"label": label, "reason": reason, "db": dir_path}
 
-# def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
-#     if not allowed_paras:
-#         return docs
-#     allowed = set(allowed_paras)
-#     kept = []
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         ids_in_doc = set(PARA_ID_RE.findall(txt))
-#         if ids_in_doc & allowed:
-#             kept.append(d)
-#     return kept if kept else docs
-
-# def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
-#     if not allowed_paras:
-#         return docs
-#     allowed = set(allowed_paras)
-#     kept = []
-#     for d in docs or []:
-#         txt = _normalize_dashes(getattr(d, "page_content", "") or "")
-#         ids_in_doc = set(PARA_ID_RE.findall(txt))
-
-#         # check chapter-level fallback match
-#         meta = d.metadata or {}
-#         chapter = meta.get("chapter_name") or meta.get("chapter") or ""
-#         source_db = meta.get("source_db") or ""
-#         chapter_key = f"{source_db} — {chapter}" if chapter else None
-
-#         if ids_in_doc & allowed or (chapter_key and chapter_key in allowed):
-#             kept.append(d)
-
-#     return kept if kept else docs
-
 def _filter_docs_by_paras(docs: List[Any], allowed_paras: List[str]) -> List[Any]:
     if not allowed_paras:
         return docs
@@ -1611,207 +1350,6 @@ def subset_references(bottom_refs: List[str], used_refs: List[str]) -> List[str]
                     break
     return keep
 
-
-# def answer_with_refine_chain(question: str):
-#     results = []
-#     for cfg in DBS:
-#         s = get_query_relevance_llm(cfg.path, question, k=5)
-#         results.append(s)
-#         print(s)
-#     if any(r["label"] == "relevant" for r in results):
-#         all_docs_in_order: List[Document] = []
-#         offsets: List[int] = []
-#         for cfg in DBS:
-#             docs = fetch_docs(question, cfg)
-#             all_docs_in_order.extend(docs)
-#             offsets.append(len(all_docs_in_order))
-#         allowed_paras: List[str] = _extract_allowed_paras_with_llm(question, all_docs_in_order)
-#         #  Fallback: if no explicit paragraph IDs detected, use chapter/source metadata
-#         if not allowed_paras:
-#             allowed_paras = []
-#             for d in all_docs_in_order:
-#                 meta = d.metadata or {}
-#                 chapter = meta.get("chapter_name") or meta.get("chapter") or ""
-#                 source_db = meta.get("source_db") or ""
-#                 if chapter:
-#                     allowed_paras.append(f"{source_db} — {chapter}")
-#             allowed_paras = sorted(set(allowed_paras))  # dedupe
-#         filtered_docs = _filter_docs_by_paras(all_docs_in_order, allowed_paras)
-
-#         refine_chain = load_summarize_chain(
-#             LLM,
-#             chain_type="stuff",
-#             prompt=stuff_prompt_normal,
-#             verbose=True,
-#         )
-#         out = refine_chain.invoke({
-#             "input_documents": filtered_docs,
-#             "question": question,
-#         })
-#         final_answer: str = out.get("output_text", "")
-#         if 'allowed_paras' in locals():
-#             final_answer = f"{final_answer}\n\n**References used:** " + (", ".join(allowed_paras) if allowed_paras else "None observed.")
-#         inter: List[str] = out.get("intermediate_steps", []) or []
-#         stage_answers: Dict[str, str] = {}
-#         if len(offsets) >= 1 and len(inter) >= offsets[0]:
-#             stage_answers["STAGE 1 (A)"] = inter[offsets[0]-1]
-#         if len(offsets) >= 2 and len(inter) >= offsets[1]:
-#             stage_answers["STAGE 2 (A+B)"] = inter[offsets[1]-1]
-#         if len(offsets) >= 3 and len(inter) >= offsets[2]:
-#             stage_answers["STAGE 3 (A+B+C)"] = inter[offsets[2]-1]
-#         if len(offsets) >= 4 and len(inter) >= offsets[3]:
-#             stage_answers["STAGE 4 (A+B+C+EY)"] = inter[offsets[3]-1]
-#         return {
-#             "answer": final_answer,
-#             "stage_answers": stage_answers,
-#             "sources": filtered_docs,
-#             "offsets": offsets,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": False,
-#             "prompt_used": "NORMAL",
-#         }
-#     else:
-#         return {
-#             "answer": "I DON'T KNOW",
-#             "stage_answers": None,
-#             "sources": None,
-#             "offsets": None,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": True,
-#             "prompt_used": "OOC",
-#         }
-
-# def answer_with_refine_chain(question: str):
-#     # Check relevance across all DBs
-#     results = []
-#     for cfg in DBS:
-#         s = get_query_relevance_llm(cfg.path, question, k=5)
-#         results.append(s)
-#         print(s)
-    
-#     if any(r["label"] == "relevant" for r in results):
-#         # Fetch all docs with unique IDs
-#         all_docs_in_order: List[Document] = []
-#         offsets: List[int] = []
-        
-#         for cfg in DBS:
-#             docs = fetch_docs(question, cfg)  # Now includes _doc_id in metadata
-#             all_docs_in_order.extend(docs)
-#             offsets.append(len(all_docs_in_order))
-
-#         #  ADD THIS PRINT
-#         print(f"\n{'#'*80}")
-#         print(f" TOTAL DOCS FETCHED: {len(all_docs_in_order)}")
-#         db_counts = {}
-#         for doc in all_docs_in_order:
-#             db = (doc.metadata or {}).get('source_db', 'Unknown')
-#             db_counts[db] = db_counts.get(db, 0) + 1
-#         for db, count in db_counts.items():
-#             print(f"  - {db}: {count} chunks")
-#         print(f"{'#'*80}\n")
-        
-#         #  Extract relevant doc IDs using LLM (replaces paragraph extraction)
-#         used_doc_ids: List[str] = _extract_allowed_doc_ids_with_llm(question, all_docs_in_order)
-        
-#         #  Filter docs strictly by doc IDs (no fallbacks!)
-#         filtered_docs = _filter_docs_by_ids(all_docs_in_order, used_doc_ids)
-        
-#         # If no docs matched, return a clear message
-#         if not filtered_docs:
-#             return {
-#                 "answer": "I couldn't identify specific relevant references for this question.",
-#                 "stage_answers": {},
-#                 "sources": [],
-#                 "offsets": offsets,
-#                 "thresholds": None,
-#                 "scores": None,
-#                 "ooc_mode": False,
-#                 "prompt_used": "NORMAL",
-#             }
-        
-#         # Generate answer using filtered docs
-#         refine_chain = load_summarize_chain(
-#             LLM,
-#             chain_type="stuff",
-#             prompt=stuff_prompt_normal,
-#             verbose=True,
-#         )
-        
-#         out = refine_chain.invoke({
-#             "input_documents": filtered_docs,
-#             "question": question,
-#         })
-        
-#         final_answer: str = out.get("output_text", "")
-        
-#         #  Build "References used" section from actual metadata
-#         refs_used = []
-#         for doc in filtered_docs:
-#             meta = doc.metadata or {}
-#             para_num = meta.get("para_number", "")
-#             chapter = meta.get("chapter_name") or meta.get("chapter", "")
-#             source_db = meta.get("source_db", "")
-#             header = meta.get("header", "")
-            
-#             # For IFRS A, B, C: use paragraph number
-#             if source_db in ["IFRS A", "IFRS B", "IFRS C"]:
-#                 if para_num and str(para_num).lower() not in {"none", "unnumbered", ""}:
-#                     refs_used.append(f"{source_db} – {chapter} – para {para_num}")
-#                 elif chapter:
-#                     refs_used.append(f"{source_db} – {chapter}")
-#             # For EY and PwC: use header
-#             elif source_db in ["EY", "PwC"]:
-#                 if header:
-#                     refs_used.append(f"{source_db} – {chapter} – {header}")
-#                 elif chapter:
-#                     refs_used.append(f"{source_db} – {chapter}")
-
-#         refs_used = sorted(set(refs_used))  # Deduplicate
-        
-#         if refs_used:
-#             # Format as bulleted list
-#             refs_list = "\n".join([f"- {ref}" for ref in refs_used])
-#             final_answer = f"{final_answer}\n\n**References used:**\n{refs_list}"
-        
-#         # Handle stage answers
-#         inter: List[str] = out.get("intermediate_steps", []) or []
-#         stage_answers: Dict[str, str] = {}
-#         if len(offsets) >= 1 and len(inter) >= offsets[0]:
-#             stage_answers["STAGE 1 (A)"] = inter[offsets[0]-1]
-#         if len(offsets) >= 2 and len(inter) >= offsets[1]:
-#             stage_answers["STAGE 2 (A+B)"] = inter[offsets[1]-1]
-#         if len(offsets) >= 3 and len(inter) >= offsets[2]:
-#             stage_answers["STAGE 3 (A+B+C)"] = inter[offsets[2]-1]
-#         if len(offsets) >= 4 and len(inter) >= offsets[3]:
-#             stage_answers["STAGE 4 (A+B+C+EY)"] = inter[offsets[3]-1]
-        
-#         return {
-#             "answer": final_answer,
-#             "stage_answers": stage_answers,
-#             "sources": filtered_docs,  #  Only the docs that were actually used
-#             "offsets": offsets,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": False,
-#             "prompt_used": "NORMAL",
-#         }
-#     else:
-#         return {
-#             "answer": "I DON'T KNOW",
-#             "stage_answers": None,
-#             "sources": None,
-#             "offsets": None,
-#             "thresholds": None,
-#             "scores": None,
-#             "ooc_mode": True,
-#             "prompt_used": "OOC",
-#         }
-
-# ═══════════════════════════════════════════════════════════════════════════
-# New Exception Handling Functions
-# ═══════════════════════════════════════════════════════════════════════════
 
 def extract_citations_from_text(text: str) -> List[str]:
     """
@@ -1969,8 +1507,8 @@ def retrieve_and_generate_exceptions(
         print(f"\nSearching for: {query}")
 
         # Fetch from all 5 databases (same as main answer)
-        for cfg in DBS:
-            docs = fetch_docs(query, cfg)
+        for cfg in retrieval_core.DBS:
+            docs = retrieval_core.fetch_docs(query, cfg)
             all_exception_docs.extend(docs)
             if docs:
                 print(f"  {cfg.name:8} Retrieved {len(docs):2d} docs")
@@ -2150,6 +1688,58 @@ def generate_unified_reference_list(
     return f"\n\n**References:**\n\n{references_text}"
 
 
+def _compute_confidence(selected_docs: List[Document], cited_doc_ids: List[str]) -> Dict[str, Any]:
+    """
+    Compute a lightweight confidence score for downstream consumers.
+
+    Components:
+    - similarity_component (50%): mean retrieval similarity of selected docs
+    - citation_coverage_component (30%): cited docs / selected docs
+    - source_diversity_component (20%): represented DB diversity (maxed at 3+ sources)
+    """
+    if not selected_docs:
+        return build_confidence_result(
+            score=0.0,
+            similarity_component=0.0,
+            citation_coverage_component=0.0,
+            source_diversity_component=0.0,
+            reason="No supporting documents were selected.",
+        )
+
+    similarity_values: List[float] = []
+    source_dbs = set()
+
+    for doc in selected_docs:
+        meta = getattr(doc, "metadata", {}) or {}
+        sim = meta.get("_similarity_score")
+        if isinstance(sim, (int, float)):
+            similarity_values.append(float(max(0.0, min(1.0, sim))))
+        source_db = meta.get("source_db")
+        if isinstance(source_db, str) and source_db.strip():
+            source_dbs.add(source_db.strip())
+
+    similarity_component = float(np.mean(similarity_values)) if similarity_values else 0.0
+    citation_coverage_component = len(set(cited_doc_ids)) / max(1, len(selected_docs))
+    source_diversity_component = min(1.0, len(source_dbs) / 3.0)
+
+    raw_score = (
+        0.50 * similarity_component
+        + 0.30 * citation_coverage_component
+        + 0.20 * source_diversity_component
+    )
+    score = float(max(0.0, min(1.0, raw_score)))
+    return build_confidence_result(
+        score=score,
+        similarity_component=similarity_component,
+        citation_coverage_component=citation_coverage_component,
+        source_diversity_component=source_diversity_component,
+        reason=(
+            f"Computed from {len(selected_docs)} selected chunks across {len(source_dbs)} source DB(s), "
+            f"with {len(set(cited_doc_ids))} cited chunk(s)."
+        ),
+    )
+
+
 def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
     """
     Main RAG function with 5-DB sequential retrieval and LLM-based filtering.
@@ -2173,7 +1763,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
     print(f"{'='*80}")
 
     results = []
-    for cfg in DBS:
+    for cfg in retrieval_core.DBS:
         s = get_query_relevance_llm(cfg.path, question, score_threshold=STAGE_1_THRESHOLD)
         results.append(s)
         status = "RELEVANT" if s["label"] == "relevant" else "NOT RELEVANT"
@@ -2188,8 +1778,8 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         all_docs_in_order: List[Document] = []
         offsets: List[int] = []
 
-        for cfg in DBS:
-            docs = fetch_docs(question, cfg)  # Now includes _doc_id in metadata
+        for cfg in retrieval_core.DBS:
+            docs = retrieval_core.fetch_docs(question, cfg)  # Now includes _doc_id in metadata
             all_docs_in_order.extend(docs)
             offsets.append(len(all_docs_in_order))
 
@@ -2233,6 +1823,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
                 "answer_text": "I couldn't identify specific relevant references for this question.",
                 "tables": [],
                 "exception_section": "",  # No exception section when no docs found
+                "confidence": _compute_confidence([], []),
                 "stage_answers": {},
                 "sources": [],
                 "offsets": offsets,
@@ -2350,12 +1941,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         # Final answer (main answer only, WITH citations - will be formatted in UI layer)
         final_answer = answer_text
 
-        # final_answer = strip_inline_citations_with_llm(final_answer)
-
-        # Exception section (WITH citations - will be formatted in UI layer)
         final_exception_section = exception_section if exception_section else ""
-        # final_exception_section = strip_inline_citations_with_llm(final_exception_section)
-
         print(f"Final answer components prepared")
         print(f"  - Main answer: ✓")
         print(f"  - Exception section: {'✓' if exception_section else '✗'}")
@@ -2399,11 +1985,14 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
         print(f"\n>> The frontend will combine 'answer' and 'exception_section' for display")
         print(f"{'='*80}\n")
 
+        confidence = _compute_confidence(all_available_docs, cited_doc_ids)
+
         return {
             "answer": final_answer,
             "answer_text": final_answer,
             "tables": tables_payload,
             "exception_section": final_exception_section,  # ← Exception section (separate from main answer)
+            "confidence": confidence,
             "stage_answers": stage_answers,
             "sources": display_sources,  # ← âœ… Filtered sources (no page=0)
             "offsets": offsets,
@@ -2420,6 +2009,7 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
             "answer_text": "I DON'T KNOW",
             "tables": [],
             "exception_section": "",  # No exception section for out-of-context queries
+            "confidence": _compute_confidence([], []),
             "stage_answers": None,
             "sources": None,
             "offsets": None,
@@ -2429,870 +2019,27 @@ def answer_with_refine_chain(question: str, llm: Optional[Any] = None):
             "prompt_used": "OOC",
         }
 
-# ------------------- Formatting / Utilities (non-table) -------------------
-
-def replace_keywords(text: str, path: str = REPLACE_EXCEL_PATH) -> str:
-    if not os.path.exists(path):
-        return text
-    try:
-        df = pd.read_excel(path, sheet_name="English")
-        repl = pd.Series(df["Replacement"].values, index=df["Word"].str.lower()).to_dict()
-        if not repl:
-            return text
-        pattern = re.compile("|".join(re.escape(k) for k in repl.keys()), re.IGNORECASE)
-        return pattern.sub(lambda m: repl.get(m.group().lower(), m.group()), text)
-    except Exception:
-        return text
-
-def emphasize_headers(text: str) -> str:
-    lines = text.split("\n")
-    return "\n".join(
-        f"**{l}**" if re.match(r".+:\s*$", l) and not l.strip().startswith("**") else l
-        for l in lines
-    )
-
-def bold_standards(text: str) -> str:
-    pattern = re.compile(r"\b(?:IFRS|IAS|IFRIC|SIC)\s?(?:\d{1,3}|for\s+SMEs)\b", re.IGNORECASE)
-    return pattern.sub(lambda m: f"**{m.group(0)}**", text)
-
-def _dedupe_tokens_case_insensitive(s: str) -> str:
-    tokens = s.split()
-    out, prev = [], None
-    for t in tokens:
-        if prev is None or t.lower() != prev.lower():
-            out.append(t)
-        prev = t
-    return " ".join(out)
-
-def fix_citation_format(text: str) -> str:
-    if not isinstance(text, str) or "[" not in text or "]" not in text:
-        return text
-    text = re.sub(r"\]\s*\n+\s*\[", "] [", text)
-    def _clean_block(m):
-        inside = m.group(1)
-        inside = re.sub(r"\s+", " ", inside).strip()
-        parts = [p.strip() for p in inside.split(";")]
-        parts = [_dedupe_tokens_case_insensitive(p) for p in parts if p]
-        return "[" + "; ".join(parts) + "]"
-    return re.sub(r"\[([^\]]+)\]", _clean_block, text)
-
-def remove_citations(text: str) -> str:
-    """
-    Remove both square-bracket and round-bracket citations from text.
-
-    Examples:
-    - Square brackets: [1], [2], [3]
-    - Round brackets: (IFRS A - ias-38 - para 60), (PwC - 21 - Intangible assets (IAS 38) - para 69)
-    """
-    if not text:
-        return ""
-
-    # Remove square-bracket citations [1], [2], etc.
-    text = re.sub(r"\[.*?\]", "", text)
-
-    # Remove round-bracket citations like (IFRS A - standard - para X)
-    # Pattern matches: (Source - ... - para/Example/IG ...)
-    text = re.sub(r'\([A-Z][^\)]*?(?:para|Example|IG)[^\)]*?\)', '', text)
-
-    return text.strip()
-
-def format_visible_answer(text: str) -> str:
-    text = replace_keywords(text)
-    text = emphasize_headers(text)
-    text = bold_standards(text)
-    text = fix_citation_format(text)
-    text = remove_citations(text)
-    return text.strip()
-
-def _make_excerpt(text: str, max_chars: int = 900) -> str:
-    if not text:
-        return "—"
-    text = text.strip()
-    return (text[:max_chars] + " …") if len(text) > max_chars else text
-
-# def _reference_title(header: str, page, source: str, chapter: str , chapter_name: str , scores:float , thresholds:float) -> str:
-#     source_name = os.path.basename(source) if isinstance(source, str) else source
-#     page_disp = f"p.{page}" if (isinstance(page, int) or str(page).isdigit()) else str(page)
-#     chap_disp = chapter if chapter else ""
-#     scores = scores if scores else 0.
-#     thresholds = thresholds if thresholds else 0.
-#     chap_name_disp = chapter_name if chapter_name else ""
-#     parts = [h for h in [header,scores,thresholds, chap_disp,chap_name_disp, page_disp, source_name] if h]
-#     return " • ".join(parts) if parts else "Reference"
-
-def _reference_title(header: str, page, source: str, chapter: str, chapter_name: str, 
-                     para_number, scores: float, thresholds: float) -> str:
-    """Build reference title including paragraph number."""
-    source_name = os.path.basename(source) if isinstance(source, str) else source
-    page_disp = f"p.{page}" if (isinstance(page, int) or str(page).isdigit()) else str(page)
-    chap_disp = chapter if chapter else ""
-    
-    # Include paragraph number if available
-    para_disp = f"para {para_number}" if para_number and str(para_number).lower() not in {"none", "unnumbered", ""} else ""
-    
-    chap_name_disp = chapter_name if chapter_name else ""
-    scores = scores if scores else 0.
-    thresholds = thresholds if thresholds else 0.
-    
-    parts = [h for h in [header, para_disp, chap_disp, chap_name_disp, page_disp, source_name] if h]
-    return " • ".join(parts) if parts else "Reference"
-
-def _format_duration(seconds: float) -> str:
-    if seconds is None:
-        return "0 minutes and 0 seconds"
-    if seconds < 0:
-        seconds = 0
-    total = int(round(seconds))
-    m, s = divmod(total, 60)
-    return f"{m} minutes and {s} seconds"
-
-_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`]+`")
-
-def _protect_markdown_blocks(text: str) -> Tuple[str, Dict[str, str]]:
-    if not text:
-        return text, {}
-
-    placeholders: Dict[str, str] = {}
-    placeholder_idx = 0
-
-    def _stash(chunk: str, prefix: str) -> str:
-        nonlocal placeholder_idx
-        key = f"<<{prefix}_{placeholder_idx}>>"
-        placeholder_idx += 1
-        placeholders[key] = chunk
-        return key
-
-    # Protect code fences to avoid accidental table detection/translation.
-    text = _CODE_FENCE_RE.sub(lambda m: _stash(m.group(0), "CODE_BLOCK"), text)
-
-    # Protect inline code spans.
-    text = _INLINE_CODE_RE.sub(lambda m: _stash(m.group(0), "INLINE_CODE"), text)
-
-    return text, placeholders
-
-def _restore_placeholders(text: str, placeholders: Dict[str, str]) -> str:
-    if not placeholders:
-        return text
-    for key, chunk in placeholders.items():
-        text = text.replace(key, chunk)
-    return text
-
-def _translate_markdown_table_block(table_md: str) -> str:
-    try:
-        df = _md_table_to_df(table_md)
-    except Exception:
-        return table_md
-
-    df = df.fillna("")
-    headers = [str(c).strip() for c in df.columns]
-
-    lines = []
-    for i, h in enumerate(headers):
-        lines.append(f"H{i:03d}||{h}")
-    for r in range(len(df)):
-        for c, h in enumerate(headers):
-            lines.append(f"C{r:03d}_{c:03d}||{str(df.iloc[r, c]).strip()}")
-
-    payload = "\n".join(lines)
-    prompt = (
-        "Translate the text to Arabic line-by-line.\n"
-        "Rules:\n"
-        "- Keep the prefix (H### or C###_###), the '||' delimiter, and any punctuation intact.\n"
-        "- Preserve numbers, percentages, and source tags in parentheses.\n"
-        "- Do not join or split lines; return the same number of lines.\n\n"
-        "INPUT:\n"
-        f"{payload}\n\n"
-        "OUTPUT:"
-    )
-
-    resp = LLM.invoke([
-        {"role": "system", "content": "You are a precise line-by-line translator that preserves formatting."},
-        {"role": "user", "content": prompt},
-    ])
-    raw = (resp.content or "").strip()
-    if not raw:
-        return table_md
-
-    translated_map: Dict[str, str] = {}
-    for line in raw.splitlines():
-        if "||" not in line:
-            continue
-        key, content = line.split("||", 1)
-        translated_map[key.strip()] = content
-
-    if len(translated_map) < len(lines):
-        return table_md
-
-    t_headers = [translated_map.get(f"H{i:03d}", headers[i]) for i in range(len(headers))]
-    out_lines = [_mk_pipe_row(t_headers), _mk_pipe_sep(len(t_headers))]
-    for r in range(len(df)):
-        row_cells = []
-        for c in range(len(headers)):
-            key = f"C{r:03d}_{c:03d}"
-            row_cells.append(translated_map.get(key, str(df.iloc[r, c]).strip()))
-        out_lines.append(_mk_pipe_row(row_cells))
-
-    return "\n".join(out_lines)
-
-def _extract_and_translate_tables(text: str) -> Tuple[str, Dict[str, str]]:
-    if not text:
-        return text, {}
-
-    placeholders: Dict[str, str] = {}
-    lines = text.splitlines()
-    blocks = _find_markdown_tables(text)
-    if not blocks:
-        return text, {}
-
-    rebuilt = []
-    cursor = 0
-    for i, (start, end, block_txt) in enumerate(blocks):
-        if start > cursor:
-            rebuilt.append("\n".join(lines[cursor:start]))
-        key = f"<<TABLE_BLOCK_{i}>>"
-        placeholders[key] = _translate_markdown_table_block(block_txt)
-        rebuilt.append(key)
-        cursor = end
-    rebuilt.append("\n".join(lines[cursor:]))
-    return "\n".join(rebuilt), placeholders
-
-def _translate_preserve_format(text: str) -> str:
-    if not text:
-        return ""
-
-    table_stripped_text, table_placeholders = _extract_and_translate_tables(text)
-    protected_text, placeholders = _protect_markdown_blocks(table_stripped_text)
-    lines = protected_text.splitlines()
-    payload = "\n".join(f"{i:04d}||{line}" for i, line in enumerate(lines))
-
-    prompt = (
-        "Translate the text to Arabic line-by-line.\n"
-        "Rules:\n"
-        "- Keep the 4-digit line number and the '||' delimiter unchanged.\n"
-        "- Preserve all markdown symbols (#, -, *, >, |) and spacing.\n"
-        "- Do NOT translate placeholders like <<CODE_BLOCK_0>>, <<TABLE_BLOCK_0>>, <<INLINE_CODE_0>>.\n"
-        "- Do not join or split lines; return the same number of lines.\n\n"
-        "INPUT:\n"
-        f"{payload}\n\n"
-        "OUTPUT:"
-    )
-
-    resp = LLM.invoke([
-        {"role": "system", "content": "You are a precise line-by-line translator that preserves formatting."},
-        {"role": "user", "content": prompt},
-    ])
-    raw = (resp.content or "").strip()
-
-    out_lines = []
-    for line in raw.splitlines():
-        if "||" not in line:
-            continue
-        _, content = line.split("||", 1)
-        out_lines.append(content)
-
-    if len(out_lines) != len(lines):
-        # Fallback to original if the line mapping breaks.
-        return text
-
-    translated = "\n".join(out_lines)
-    translated = _restore_placeholders(translated, placeholders)
-    translated = _restore_placeholders(translated, table_placeholders)
-    return translated
-
-def translate_to_arabic(text: str) -> str:
-    try:
-        out = _translate_preserve_format(text)
-        out = remove_citations(fix_citation_format(out))
-        return out
-    except Exception as e:
-        return f"️ Translation failed: {e}"
-
-# def _unify_metadata(meta: dict) -> dict:
-#     if not isinstance(meta, dict):
-#         meta = {}
-#     doc_name_raw = meta.get("doc_name") or meta.get("document_name") or meta.get("source") or meta.get("document") or ""
-#     doc_name = str(doc_name_raw) or "Document"
-#     publisher = meta.get("publisher") or ""
-#     chapter = meta.get("chapter") or meta.get("chapter_title") or ""
-#     chapter_name = meta.get("chapter_name") or ""
-#     header = meta.get("header") or meta.get("section") or meta.get("title") or ""
-#     page = meta.get("page", meta.get("page_number", meta.get("start_page", 0)))
-#     try:
-#         page = int(page) if page is not None and page != "" else 0
-#     except Exception:
-#         page = 0
-#     unified = {
-#         "doc_name": doc_name,
-#         "publisher": publisher,
-#         "chapter": str(chapter) if chapter is not None else "",
-#         "header": str(header) if header is not None else "",
-#         "page": page,
-#         "chapter_name" : chapter_name,
-#     }
-#     return unified
-
-def _unify_metadata(meta: dict) -> dict:
-    if not isinstance(meta, dict):
-        meta = {}
-    
-    doc_name_raw = meta.get("doc_name") or meta.get("document_name") or meta.get("source") or meta.get("document") or ""
-    doc_name = str(doc_name_raw) or "Document"
-    publisher = meta.get("publisher") or ""
-    chapter = meta.get("chapter") or meta.get("chapter_title") or ""
-    chapter_name = meta.get("chapter_name") or ""
-    header = meta.get("header") or meta.get("section") or meta.get("title") or ""
-    para_number = meta.get("para_number") or meta.get("paragraph") or ""  # NEW
-    
-    page = meta.get("page", meta.get("page_number", meta.get("start_page", 0)))
-    try:
-        page = int(page) if page is not None and page != "" else 0
-    except Exception:
-        page = 0
-    
-    unified = {
-        "doc_name": doc_name,
-        "publisher": publisher,
-        "chapter": str(chapter) if chapter is not None else "",
-        "header": str(header) if header is not None else "",
-        "page": page,
-        "chapter_name": chapter_name,
-        "para_number": str(para_number) if para_number else "",  # NEW
-    }
-    return unified
-
-
-# ------------------- PDF Export Helper Functions -------------------
-
-_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
-_HTML_TAG_RE = re.compile(r"(<[^>]+>)")
-
-def _contains_arabic(text: str) -> bool:
-    return bool(_ARABIC_RE.search(text or ""))
-
-def _shape_arabic_text(text: str) -> str:
-    if not text:
-        return text
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-    except Exception:
-        return text
-    lines = text.splitlines()
-    shaped = []
-    for line in lines:
-        reshaped = arabic_reshaper.reshape(line)
-        shaped.append(get_display(reshaped))
-    return "\n".join(shaped)
-
-def _shape_arabic_preserve_tags(text: str) -> str:
-    if not _contains_arabic(text):
-        return text
-    parts = _HTML_TAG_RE.split(text)
-    out = []
-    for part in parts:
-        if part.startswith("<") and part.endswith(">"):
-            out.append(part)
-        else:
-            out.append(_shape_arabic_text(part))
-    return "".join(out)
-
-def _md_to_html(text: str, rtl: bool = False) -> str:
-    text = sanitize_text(text)
-    text = remove_citations(fix_citation_format(text))
-    html = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    html = html.replace("\n", "<br/>")
-    return _shape_arabic_preserve_tags(html) if rtl else html
-
-def _register_arabic_font() -> str:
-    if not REPORTLAB_AVAILABLE:
-        return ""
-    try:
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-    except Exception:
-        return ""
-
-    font_candidates = [
-        os.getenv("ARABIC_PDF_FONT_PATH", ""),
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "/Library/Fonts/Arial.ttf",
-    ]
-    for path in font_candidates:
-        if path and os.path.exists(path):
-            try:
-                font_name = "ArabicFont"
-                pdfmetrics.registerFont(TTFont(font_name, path))
-                return font_name
-            except Exception:
-                continue
-    return ""
-
-
-def _split_into_segments(text_block: str) -> List[Tuple[str, Union[str, pd.DataFrame]]]:
-    text_block = _canonicalize_all_tables(text_block or "")
-    lines = text_block.splitlines()
-    tables = _find_markdown_tables(text_block)
-    segments: List[Tuple[str, Union[str, pd.DataFrame]]] = []
-    cursor = 0
-    for (start, end, block) in tables:
-        if start > cursor:
-            prose = "\n".join(lines[cursor:start]).strip()
-            if prose:
-                segments.append(("text", prose))
-        try:
-            df = _md_table_to_df(block)
-            df = _drop_leading_empty_column(df)
-            segments.append(("table", df))
-        except Exception:
-            segments.append(("text", block))
-        cursor = end
-    if cursor < len(lines):
-        tail = "\n".join(lines[cursor:]).strip()
-        if tail:
-            segments.append(("text", tail))
-    return segments
-
-
-def _tables_payload_to_dfs(tables_payload: Any) -> List[Tuple[str, pd.DataFrame]]:
-    out: List[Tuple[str, pd.DataFrame]] = []
-    for t in _normalize_tables_payload(tables_payload):
-        cols = t.get("columns") or []
-        rows = t.get("rows") or []
-        try:
-            df = pd.DataFrame(rows, columns=cols)
-        except Exception:
-            continue
-        df = df.fillna("").applymap(_normalize_table_cell)
-        df = _drop_leading_empty_column(df)
-        out.append((t.get("table_name") or "", df))
-    return out
-
-
-def _build_pdf_reportlab(history: list) -> bytes:
-    buf = BytesIO()
-    doc = SimpleDocTemplate(
-        buf,
-        pagesize=A4,
-        leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36
-    )
-    styles = getSampleStyleSheet()
-    title_style = styles["Heading1"]
-    meta_style = ParagraphStyle("meta", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
-    user_style = ParagraphStyle("user", parent=styles["Normal"], spaceBefore=6, spaceAfter=2, alignment=TA_LEFT)
-    bot_style = ParagraphStyle("bot", parent=styles["Normal"], spaceBefore=2, spaceAfter=10, alignment=TA_LEFT)
-    header_style = styles["Heading3"]
-    excerpt_style = ParagraphStyle("excerpt", parent=styles["Normal"], fontSize=9, textColor=colors.black)
-    cell_style = ParagraphStyle("cell", parent=styles["Normal"], fontSize=8, leading=10, spaceAfter=0, spaceBefore=0, alignment=TA_LEFT)
-
-    arabic_font = _register_arabic_font()
-    arabic_font_name = arabic_font or styles["Normal"].fontName
-    user_style_rtl = ParagraphStyle(
-        "user_rtl",
-        parent=styles["Normal"],
-        fontName=arabic_font_name,
-        spaceBefore=6,
-        spaceAfter=2,
-        alignment=TA_RIGHT,
-    )
-    bot_style_rtl = ParagraphStyle(
-        "bot_rtl",
-        parent=styles["Normal"],
-        fontName=arabic_font_name,
-        spaceBefore=2,
-        spaceAfter=10,
-        alignment=TA_RIGHT,
-    )
-    cell_style_rtl = ParagraphStyle(
-        "cell_rtl",
-        parent=styles["Normal"],
-        fontName=arabic_font_name,
-        fontSize=8,
-        leading=10,
-        spaceAfter=0,
-        spaceBefore=0,
-        alignment=TA_RIGHT,
-    )
-
-    story = []
-    story.append(Paragraph("IFRS Chat – Conversation Export", title_style))
-    story.append(Spacer(1, 8))
-
-    tbl_style = TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 3),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-    ])
-
-    usable_width = doc.width
-
-    def _render_table_df(df: pd.DataFrame, title: str = ""):
-        df = _drop_leading_empty_column(df)
-        if df is None or df.empty:
-            return
-        if title:
-            story.append(Paragraph(f"<b>{sanitize_text(title)}</b>", styles["Normal"]))
-        table_rtl = _contains_arabic(" ".join([str(c) for c in df.columns] + df.astype(str).values.flatten().tolist()))
-        cell_style_use = cell_style_rtl if table_rtl else cell_style
-        header_cells = [Paragraph(f"<b>{_shape_arabic_text(sanitize_text(str(c))) if table_rtl else sanitize_text(str(c))}</b>", cell_style_use) for c in df.columns]
-        data_rows = []
-        for _, row in df.iterrows():
-            row_cells = []
-            for c in df.columns:
-                cell_text = sanitize_text(str(row[c]))
-                if table_rtl:
-                    cell_text = _shape_arabic_text(cell_text)
-                row_cells.append(Paragraph(cell_text, cell_style_use))
-            data_rows.append(row_cells)
-        data = [header_cells] + data_rows
-
-        counts = []
-        for c in df.columns:
-            col_vals = [str(c)] + df[c].astype(str).tolist()
-            counts.append(max(len(v) for v in col_vals))
-        tot = sum(counts) or 1
-        MIN_W = 36
-        col_widths = [max(MIN_W, usable_width * (cnt / tot)) for cnt in counts]
-        scale = usable_width / sum(col_widths)
-        col_widths = [w * scale for w in col_widths]
-
-        t = Table(data, colWidths=col_widths, repeatRows=1, splitByRow=1, hAlign="RIGHT" if table_rtl else "LEFT")
-        t.setStyle(tbl_style)
-        t.setStyle(TableStyle([
-            ("WORDWRAP", (0, 0), (-1, -1), True),
-            ("ALIGN", (0, 0), (-1, -1), "RIGHT" if table_rtl else "LEFT"),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        story.append(t)
-        story.append(Spacer(1, 6))
-
-    def _emit_segments(label: str, text_block: str):
-        # Canonicalize first so we detect/parse neatly
-        text_block = _canonicalize_all_tables(text_block or "")
-        story.append(Paragraph(f"<b>{label}</b>", styles["Normal"]))
-        segments = _split_into_segments(text_block)
-
-        for kind, payload in segments:
-            if kind == "text":
-                rtl = _contains_arabic(payload)
-                prose = _md_to_html(payload, rtl=rtl)
-                style = bot_style_rtl if (rtl and label.startswith("Assistant")) else user_style_rtl if rtl else bot_style if label.startswith("Assistant") else user_style
-                story.append(Paragraph(prose, style))
-            else:
-                df: pd.DataFrame = payload
-                _render_table_df(df)
-
-    def _emit_tables(tables_payload: Any):
-        for title, df in _tables_payload_to_dfs(tables_payload):
-            _render_table_df(df, title=title)
-
-    for n, chat in enumerate(history):
-        meta = "Answer from Database • IFRS A/B/C (Refine Chain)"
-        story.append(Paragraph(meta, meta_style))
-        _emit_segments("User:", chat.get("question", ""))
-        _emit_segments("Assistant:", chat.get("answer", ""))
-        _emit_tables(chat.get("tables"))
-        dur_text = _format_duration(chat.get("time_taken_sec"))
-        story.append(Paragraph(f"<b>Time taken to answer : {dur_text}.</b>", meta_style))
-
-        stage_ans = chat.get("stage_answers") or {}
-        if stage_ans:
-            story.append(Paragraph("<b>Intermediate Answers:</b>", header_style))
-            for k in ["STAGE 1 (A)", "STAGE 2 (A+B)", "STAGE 3 (A+B+C)", "STAGE 4 (A+B+C+EY)"]:
-                val = stage_ans.get(k, "")
-                if isinstance(val, str) and val.strip():
-                    story.append(Paragraph(f"<b>{k}</b>", styles["Normal"]))
-                    _emit_segments("", val)
-
-        sources = chat.get("sources") or []
-        sources = filter_page_zero_references(sources)
-        if (chat.get("answer") or "").strip().lower() != "sources not found." and sources:
-            story.append(Paragraph("<b>References (with excerpts):</b>", header_style))
-            for doc_i in sources:
-                m = _unify_metadata(getattr(doc_i, "metadata", {}) or {})
-                source_db = m.get('doc_name', 'Document')
-
-                # Match UI format: different fields for IFRS vs EY/PwC
-                if source_db in ["IFRS A", "IFRS B", "IFRS C"]:
-                    ref_parts = [
-                        f"Document: {sanitize_text(source_db)}",
-                        f"Standard Name: {sanitize_text(m.get('chapter_name') or '—')}",
-                        f"Paragraph Number: {sanitize_text(m.get('para_number') or '—')}",
-                        f"Header: {sanitize_text(m.get('header') or '—')}",
-                        f"Page: {m.get('page', 0)}",
-                        f"Publisher: {sanitize_text(m.get('publisher') or '—')}",
-                    ]
-                else:
-                    ref_parts = [
-                        f"Document: {sanitize_text(source_db)}",
-                        f"Chapter Name: {sanitize_text(m.get('chapter_name') or '—')}",
-                        f"Paragraph Number: {sanitize_text(m.get('para_number') or '—')}",
-                        f"Header: {sanitize_text(m.get('header') or '—')}",
-                        f"Page: {m.get('page', 0)}",
-                        f"Publisher: {sanitize_text(m.get('publisher') or '—')}",
-                    ]
-                story.append(Paragraph(" | ".join(ref_parts), meta_style))
-                chunk_text = getattr(doc_i, "page_content", "") or ""
-                story.append(Paragraph(_md_to_html(_make_excerpt(chunk_text)), excerpt_style))
-                story.append(Spacer(1, 4))
-
-        if n < len(history) - 1:
-            story.append(PageBreak())
-
-    doc.build(story)
-    return buf.getvalue()
-
-
-def _build_pdf_fpdf(history: list) -> bytes:
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=12)
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "IFRS Chat – Conversation Export", ln=1)
-    pdf.ln(2)
-
-    def _get_fpdf_arabic_font():
-        font_candidates = [
-            os.getenv("ARABIC_PDF_FONT_PATH", ""),
-            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-            "/Library/Fonts/Arial Unicode.ttf",
-            "/Library/Fonts/Arial.ttf",
-        ]
-        for path in font_candidates:
-            if path and os.path.exists(path):
-                try:
-                    pdf.add_font("ArabicFont", "", path, uni=True)
-                    return "ArabicFont"
-                except Exception:
-                    continue
-        return ""
-
-    arabic_fpdf_font = _get_fpdf_arabic_font()
-
-    def write_wrapped(text, style="", rtl=False):
-        text = sanitize_text(text)
-        text = remove_citations(fix_citation_format(text))
-        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-        if rtl:
-            text = _shape_arabic_text(text)
-        for line in text.split("\n"):
-            if rtl and arabic_fpdf_font:
-                pdf.set_font(arabic_fpdf_font, style, 11)
-                pdf.multi_cell(0, 6, line, align="R")
-            else:
-                pdf.set_font("Arial", style, 11)
-                pdf.multi_cell(0, 6, line)
-        pdf.ln(1)
-
-    def _compute_col_widths_fpdf(df, page_width):
-        counts = []
-        for c in df.columns:
-            col_vals = [str(c)] + df[c].astype(str).tolist()
-            counts.append(max(len(v) for v in col_vals))
-        tot = sum(counts) or 1
-        widths = [(page_width * (cnt / tot)) for cnt in counts]
-        MIN_W = 18
-        widths = [max(MIN_W, w) for w in widths]
-        scale = page_width / sum(widths)
-        return [w * scale for w in widths]
-
-    def draw_table(df: pd.DataFrame, font_size=9, rtl=False):
-        df = _drop_leading_empty_column(df)
-        if df is None or df.empty:
-            return
-        page_width = pdf.w - pdf.l_margin - pdf.r_margin
-
-        # Proportional widths with floor; normalize to fit
-        counts = []
-        for c in df.columns:
-            col_vals = [str(c)] + df[c].astype(str).tolist()
-            counts.append(max(len(v) for v in col_vals))
-        tot = sum(counts) or 1
-        widths = [(page_width * (cnt / tot)) for cnt in counts]
-        MIN_W = 18
-        widths = [max(MIN_W, w) for w in widths]
-        scale = page_width / sum(widths)
-        widths = [w * scale for w in widths]
-
-        # Header
-        if rtl and arabic_fpdf_font:
-            pdf.set_font(arabic_fpdf_font, "B", font_size)
-        else:
-            pdf.set_font("Arial", "B", font_size)
-        for j, col in enumerate(df.columns):
-            cell_text = sanitize_text(str(col))
-            if rtl:
-                cell_text = _shape_arabic_text(cell_text)
-            pdf.cell(widths[j], 6, cell_text, border=1, align="R" if rtl else "L")
-        pdf.ln(6)
-
-        # Rows
-        if rtl and arabic_fpdf_font:
-            pdf.set_font(arabic_fpdf_font, "", max(8, font_size - 1 if len(df.columns) >= 7 else font_size))
-        else:
-            pdf.set_font("Arial", "", max(8, font_size - 1 if len(df.columns) >= 7 else font_size))
-        for _, row in df.iterrows():
-            y_start = pdf.get_y()
-            max_y = y_start
-            x_start = pdf.get_x()
-            for j, col in enumerate(df.columns):
-                x = pdf.get_x()
-                y = pdf.get_y()
-                cell_text = sanitize_text(str(row[col]))
-                if rtl:
-                    cell_text = _shape_arabic_text(cell_text)
-                pdf.multi_cell(widths[j], 6, cell_text, border=1, align="R" if rtl else "L")
-                max_y = max(max_y, pdf.get_y())
-                pdf.set_xy(x + widths[j], y)
-            pdf.set_xy(x_start, max_y)
-
-    def emit_segments(label: str, text_block: str):
-        text_block = _canonicalize_all_tables(text_block or "")
-        pdf.set_font("Arial", "B", 11)
-        pdf.multi_cell(0, 6, label)
-        segments = _split_into_segments(text_block)
-        for kind, payload in segments:
-            if kind == "text":
-                rtl = _contains_arabic(payload)
-                write_wrapped(payload, style="", rtl=rtl)
-            else:
-                table_rtl = _contains_arabic(" ".join([str(c) for c in payload.columns] + payload.astype(str).values.flatten().tolist()))
-                draw_table(payload, font_size=9, rtl=table_rtl)
-
-    def emit_tables(tables_payload: Any):
-        for title, df in _tables_payload_to_dfs(tables_payload):
-            if title:
-                write_wrapped(title, style="B")
-            table_rtl = _contains_arabic(" ".join([str(c) for c in df.columns] + df.astype(str).values.flatten().tolist()))
-            draw_table(df, font_size=9, rtl=table_rtl)
-
-    for chat in history:
-        pdf.set_text_color(120, 120, 120)
-        write_wrapped("Answer from Database • IFRS A/B/C (Refine Chain)")
-        pdf.set_text_color(0, 0, 0)
-        emit_segments("User:", chat.get("question", ""))
-        emit_segments("Assistant:", chat.get("answer", ""))
-        emit_tables(chat.get("tables"))
-        dur_text = _format_duration(chat.get("time_taken_sec"))
-        pdf.set_font("Arial", "B", 10)
-        write_wrapped(f"Time taken to answer : {dur_text}.", style="B")
-
-        stage_ans = chat.get("stage_answers") or {}
-        if stage_ans:
-            pdf.set_font("Arial", "B", 11)
-            pdf.cell(0, 6, "Intermediate Answers:", ln=1)
-            pdf.set_font("Arial", "", 10)
-            for k in ["STAGE 1 (A)", "STAGE 2 (A+B)", "STAGE 3 (A+B+C)", "STAGE 4 (A+B+C+EY)"]:
-                val = stage_ans.get(k, "")
-                if isinstance(val, str) and val.strip():
-                    write_wrapped(f"{k}:", style="B")
-                    segments = _split_into_segments(val)
-                    for kind, payload in segments:
-                        if kind == "text":
-                            write_wrapped(payload)
-                        else:
-                            draw_table(payload, font_size=8)
-
-        sources = chat.get("sources") or []
-        #  ADD THIS: Filter page=0 from PDF export
-        sources = filter_page_zero_references(sources)
-        if (chat.get("answer") or "").strip().lower() != "sources not found." and sources:
-            pdf.set_font("Arial", "B", 11)
-            pdf.cell(0, 6, "References (with excerpts):", ln=1)
-            pdf.set_font("Arial", "", 10)
-            for doc_i in sources:
-                m = _unify_metadata(getattr(doc_i, "metadata", {}) or {})
-                parts = [
-                    f"Document: {sanitize_text(m.get('doc_name','Document'))}",
-                    f"Chapter_OR_Standard: {sanitize_text(m.get('chapter') or '—')}",
-                    f"Chapter Name: {sanitize_text(m.get('chapter_name') or '—')}",
-                    f"Paragraph: {sanitize_text(m.get('para_number') or '—')}",
-                    f"Header: {sanitize_text(m.get('header') or '—')}",
-                    f"Page: {m.get('page', 0)}",
-                    f"Publisher: {sanitize_text(m.get('publisher') or '—')}",
-                ]
-                write_wrapped(" | ".join(parts))
-                chunk_text = getattr(doc_i, "page_content", "") or ""
-                s = _make_excerpt(chunk_text)
-                write_wrapped(s)
-
-    out = BytesIO()
-    out.write(pdf.output(dest="S").encode("latin1", errors="ignore"))
-    return out.getvalue()
-
-
-def _df_to_html_table(df: pd.DataFrame, rtl: bool = False) -> str:
-    df = _drop_leading_empty_column(df)
-    if df is None or df.empty:
-        return ""
-    ths = "".join(f"<th>{html.escape(str(c))}</th>" for c in df.columns)
-    rows = []
-    for _, row in df.iterrows():
-        tds = "".join(f"<td>{html.escape(str(row[c]))}</td>" for c in df.columns)
-        rows.append(f"<tr>{tds}</tr>")
-    dir_attr = ' dir="rtl"' if rtl else ""
-    return f'<table{dir_attr}><thead><tr>{ths}</tr></thead><tbody>{"".join(rows)}</tbody></table>'
-
-
-def _build_html_export(history: list) -> str:
-    css = """
-    body { font-family: Arial, sans-serif; color: #111; }
-    .message { margin: 18px 0; }
-    .label { font-weight: 700; margin: 10px 0 6px; }
-    .markdown { line-height: 1.6; }
-    .rtl { direction: rtl; text-align: right; }
-    table { border-collapse: collapse; width: 100%; margin: 8px 0 14px; font-size: 13px; }
-    th, td { border: 1px solid #999; padding: 6px 8px; text-align: left; vertical-align: top; }
-    .rtl th, .rtl td { text-align: right; }
-    """
-    parts = [
-        "<!doctype html>",
-        "<html><head><meta charset='utf-8'/>",
-        f"<style>{css}</style></head><body>",
-        "<h1>IFRS Chat – Conversation Export</h1>",
-    ]
-
-    for chat in history:
-        parts.append("<div class='message'>")
-        parts.append("<div class='label'>Answer from Database • IFRS A/B/C (Refine Chain)</div>")
-
-        for label, text_block in [("User:", chat.get("question", "")), ("Assistant:", chat.get("answer", ""))]:
-            text_block = _canonicalize_all_tables(text_block or "")
-            segments = _split_into_segments(text_block)
-            parts.append(f"<div class='label'>{html.escape(label)}</div>")
-            for kind, payload in segments:
-                if kind == "text":
-                    rtl = _contains_arabic(payload)
-                    prose = _md_to_html(payload, rtl=rtl)
-                    cls = "markdown rtl" if rtl else "markdown"
-                    parts.append(f"<div class='{cls}'>{prose}</div>")
-                else:
-                    df = payload
-                    table_rtl = _contains_arabic(" ".join([str(c) for c in df.columns] + df.astype(str).values.flatten().tolist()))
-                    cls = "markdown rtl" if table_rtl else "markdown"
-                    parts.append(f"<div class='{cls}'>")
-                    parts.append(_df_to_html_table(df, rtl=table_rtl))
-                    parts.append("</div>")
-            if label.startswith("Assistant"):
-                for title, df in _tables_payload_to_dfs(chat.get("tables")):
-                    table_rtl = _contains_arabic(" ".join([str(c) for c in df.columns] + df.astype(str).values.flatten().tolist()))
-                    cls = "markdown rtl" if table_rtl else "markdown"
-                    if title:
-                        parts.append(f"<div class='label'>{html.escape(title)}</div>")
-                    parts.append(f"<div class='{cls}'>")
-                    parts.append(_df_to_html_table(df, rtl=table_rtl))
-                    parts.append("</div>")
-
-        dur_text = _format_duration(chat.get("time_taken_sec"))
-        parts.append(f"<div class='label'>Time taken to answer : {html.escape(dur_text)}.</div>")
-        parts.append("</div>")
-
-    parts.append("</body></html>")
-    return "".join(parts)
+# ------------------- Formatting / Export / Translation compatibility -------------------
+# NOTE: these implementations were moved into focused modules to reduce the size
+# and maintenance burden of engine.py. Keep imports here for backward compatibility.
+from rag_engine.formatting import (
+    _format_duration,
+    _make_excerpt,
+    _reference_title,
+    _unify_metadata,
+    bold_standards,
+    emphasize_headers,
+    fix_citation_format,
+    format_visible_answer,
+    remove_citations,
+    replace_keywords,
+    sanitize_text,
+)
+from rag_engine.exports import (
+    FPDF_AVAILABLE,
+    REPORTLAB_AVAILABLE,
+    _build_html_export,
+    _build_pdf_fpdf,
+    _build_pdf_reportlab,
+)
+from rag_engine.translate import translate_to_arabic
