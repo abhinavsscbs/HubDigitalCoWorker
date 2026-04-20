@@ -13,3 +13,5 @@ python backend/api_smoke_test.py --base-url http://localhost:3000
 
 This script starts `ask`, `followup`, and `translate`, and polls `/api/updatestatus` until each prompt reaches a terminal status (`Completed` or `Failed`).  
 It intentionally has **no max polling limit and no timeout cap** on the polling loop.
+
+The script does not print payloads. Instead, it stores start/final/poll-history payloads as JSON files in `api_test_results/` (configurable via `--results-dir`).
