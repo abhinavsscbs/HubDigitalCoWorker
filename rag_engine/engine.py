@@ -37,8 +37,13 @@ import torch
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain.chains.summarize import load_summarize_chain
-from langchain.chains import LLMChain
+try:
+    from langchain.chains.summarize import load_summarize_chain
+    from langchain.chains import LLMChain
+except ModuleNotFoundError:
+    # langchain>=1 moved many chain implementations to langchain-classic.
+    from langchain_classic.chains.summarize import load_summarize_chain
+    from langchain_classic.chains import LLMChain
 from langchain_core.prompts import PromptTemplate
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -393,7 +398,6 @@ from collections import defaultdict
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.documents import Document
 from langchain_core.prompts import PromptTemplate
-from langchain.chains.summarize import load_summarize_chain
 
 
 # PARA_ID_RE = re.compile(
