@@ -7,6 +7,7 @@ import os
 import sys
 import uuid
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -112,7 +113,7 @@ def _prompt_payload(chat_entry):
         "promptId": chat_entry.get("prompt_id"),
         "promptStatus": chat_entry.get("prompt_status", "Completed"),
         "promptTitle": chat_entry.get("prompt_title") or _derive_prompt_title(chat_entry.get("question", "")),
-        "promptResponseText": chat_entry.get("answer", ""),
+        "promptResponseText": chat_entry.get("promptResponseText", chat_entry.get("answer", "")),
         "promptResponseTabularContent": tabular_content,
         # Keep full render-critical data once, without repeating top-level prompt fields.
         "renderData": {
@@ -512,40 +513,31 @@ def translate():
         if latest.get('is_arabic'):
             return jsonify(_prompt_error_response('Already translated to Arabic', 400)), 400
         if latest.get('prompt_status') == 'Thinking':
-            return jsonify(_prompt_error_response('Cannot translate while response is still thinking', 400)), 400
+            # Ask runs asynchronously. Translation requests may arrive before
+            # the answer is finalized; wait briefly to reduce flaky failures.
+            wait_start = time.perf_counter()
+            wait_timeout_sec = 30
+            poll_interval_sec = 0.5
+            while time.perf_counter() - wait_start < wait_timeout_sec:
+                time.sleep(poll_interval_sec)
+                session = get_session(user_id)
+                if not session['chat_history']:
+                    break
+                latest = session['chat_history'][0]
+                if latest.get('prompt_status') != 'Thinking':
+                    break
 
-        # Translate
-        q_ar = translate_to_arabic(latest["question"])
-        a_ar = translate_to_arabic(latest["answer"])
+            if latest.get('prompt_status') == 'Thinking':
+                return jsonify(_prompt_error_response('Cannot translate while response is still thinking', 409)), 409
 
-        q_ar = remove_citations(fix_citation_format(q_ar))
+        # Translate response text only; keep all other payload fields unchanged.
+        response_text = latest.get("promptResponseText") or latest.get("answer", "")
+        a_ar = translate_to_arabic(response_text)
         a_ar = remove_citations(fix_citation_format(a_ar))
 
-        # Create Arabic entry
-        arabic_entry = {
-            "mode": latest.get("mode", "Answer from Database"),
-            "kb": latest.get("kb", "IFRS A/B/C"),
-            "user_id": user_id,
-            "username": username,
-            "email": email,
-            "question": q_ar,
-            "answer": a_ar,
-            "sources": latest.get("sources", []),
-            "stage_answers": latest.get("stage_answers", {}),
-            "tables": latest.get("tables", []),
-            "table_data": latest.get("table_data", []),
-            "has_tables": latest.get("has_tables", False),
-            "prompt_id": latest.get("prompt_id"),
-            "original_prompt_id": latest.get("original_prompt_id"),
-            "referenced_prompt_id": latest.get("referenced_prompt_id"),
-            "prompt_status": latest.get("prompt_status", "Completed"),
-            "prompt_title": latest.get("prompt_title", _derive_prompt_title(q_ar)),
-            "promptRequestText": q_ar,
-            "promptResponseText": a_ar,
-            "promptResponseTabularData": latest.get("promptResponseTabularData", {"headers": [], "rows": []}),
-            "is_arabic": True,
-            "time_taken_sec": latest.get("time_taken_sec"),
-        }
+        arabic_entry = dict(latest)
+        arabic_entry["promptResponseText"] = a_ar
+        arabic_entry["is_arabic"] = True
 
         session['chat_history'].insert(0, arabic_entry)
         save_session(user_id, session)
