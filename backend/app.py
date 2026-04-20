@@ -184,10 +184,22 @@ def _update_chat_entry(user_id, prompt_id, changes):
         return None
 
 
-def _build_thinking_entry(user_id, username, email, question, prompt_id):
+def _build_thinking_entry(
+    user_id,
+    username,
+    email,
+    question,
+    prompt_id,
+    *,
+    prompt_title=None,
+    mode="Answer from Database",
+    kb="IFRS A/B/C",
+    original_prompt_id=None,
+    referenced_prompt_id=None,
+):
     return {
-        "mode": "Answer from Database",
-        "kb": "IFRS A/B/C",
+        "mode": mode,
+        "kb": kb,
         "user_id": user_id,
         "username": username,
         "email": email,
@@ -200,10 +212,10 @@ def _build_thinking_entry(user_id, username, email, question, prompt_id):
         "table_data": [],
         "tables": [],
         "prompt_id": prompt_id,
-        "original_prompt_id": prompt_id,
-        "referenced_prompt_id": None,
+        "original_prompt_id": original_prompt_id or prompt_id,
+        "referenced_prompt_id": referenced_prompt_id,
         "prompt_status": "Thinking",
-        "prompt_title": _derive_prompt_title(question),
+        "prompt_title": prompt_title or _derive_prompt_title(question),
         "promptRequestText": question,
         "promptResponseText": "Thinking",
         "promptResponseTabularData": {"headers": [], "rows": []},
@@ -309,6 +321,134 @@ def _complete_ask_prompt(user_id, prompt_id, question):
         })
 
 
+def _build_followup_context(chat_history, referenced_prompt_id):
+    base_entry = None
+    if referenced_prompt_id:
+        for entry in chat_history:
+            if entry.get("prompt_id") == referenced_prompt_id:
+                base_entry = entry
+                break
+        if base_entry is None:
+            return None, None, 'Unknown promptId for userId'
+
+    if base_entry is not None:
+        prev_q = base_entry.get('question') or base_entry.get('promptRequestText') or ''
+        root_prompt_id = base_entry.get("original_prompt_id") or referenced_prompt_id
+    else:
+        prev_q = ''
+        root_prompt_id = None
+        for entry in chat_history:
+            if not entry.get('is_arabic') and entry.get('prompt_status') == 'Completed':
+                prev_q = entry.get('question') or entry.get('promptRequestText') or ''
+                root_prompt_id = entry.get('original_prompt_id') or entry.get('prompt_id')
+                break
+
+    return prev_q, root_prompt_id, None
+
+
+def _resolve_followup_context(user_id, referenced_prompt_id):
+    session = get_session(user_id)
+    prev_q, root_prompt_id, followup_err = _build_followup_context(
+        session.get("chat_history", []),
+        referenced_prompt_id,
+    )
+    if followup_err:
+        raise ValueError(followup_err)
+    return prev_q, root_prompt_id
+
+
+def _complete_followup_prompt(user_id, prompt_id, question, referenced_prompt_id):
+    try:
+        prev_q, _ = _resolve_followup_context(user_id, referenced_prompt_id)
+        combined_question = f"{prev_q} {question}".strip()
+        result = _run_answer_pipeline(combined_question)
+        _update_chat_entry(user_id, prompt_id, {
+            "answer": result["answer"],
+            "stage_answers": result["stage_answers"],
+            "sources": result["sources"],
+            "time_taken_sec": result["time_taken_sec"],
+            "has_tables": result["has_tables"],
+            "table_data": result["table_data"],
+            "tables": result["tables"],
+            "prompt_status": "Completed",
+            "promptResponseText": result["answer"],
+            "promptResponseTabularData": result["promptResponseTabularData"],
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        _update_chat_entry(user_id, prompt_id, {
+            "prompt_status": "Failed",
+            "answer": f"Request failed: {str(exc)}",
+            "promptResponseText": f"Request failed: {str(exc)}",
+            "promptResponseTabularData": {"headers": [], "rows": []},
+            "has_tables": False,
+            "table_data": [],
+            "tables": [],
+        })
+
+
+def _complete_translate_prompt(user_id, prompt_id):
+    try:
+        session = get_session(user_id)
+        current_entry = None
+        for entry in session.get("chat_history", []):
+            if entry.get("prompt_id") == prompt_id:
+                current_entry = entry
+                break
+        if current_entry is None:
+            raise ValueError("Unknown promptId for userId")
+
+        source_prompt_id = current_entry.get("referenced_prompt_id")
+        source_entry = None
+        for entry in session.get("chat_history", []):
+            if source_prompt_id and entry.get("prompt_id") == source_prompt_id:
+                source_entry = entry
+                break
+
+        if source_entry is None:
+            for entry in session.get("chat_history", []):
+                if entry.get("prompt_id") != prompt_id and not entry.get("is_arabic") and entry.get("prompt_status") == "Completed":
+                    source_entry = entry
+                    break
+
+        if source_entry is None:
+            raise ValueError("No completed response found to translate")
+
+        q_ar = translate_to_arabic(source_entry["question"])
+        a_ar = translate_to_arabic(source_entry["answer"])
+
+        q_ar = remove_citations(fix_citation_format(q_ar))
+        a_ar = remove_citations(fix_citation_format(a_ar))
+
+        _update_chat_entry(user_id, prompt_id, {
+            "question": q_ar,
+            "answer": a_ar,
+            "sources": source_entry.get("sources", []),
+            "stage_answers": source_entry.get("stage_answers", {}),
+            "tables": source_entry.get("tables", []),
+            "table_data": source_entry.get("table_data", []),
+            "has_tables": source_entry.get("has_tables", False),
+            "prompt_status": "Completed",
+            "prompt_title": source_entry.get("prompt_title", _derive_prompt_title(q_ar)),
+            "promptRequestText": q_ar,
+            "promptResponseText": a_ar,
+            "promptResponseTabularData": source_entry.get("promptResponseTabularData", {"headers": [], "rows": []}),
+            "is_arabic": True,
+            "time_taken_sec": source_entry.get("time_taken_sec"),
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        _update_chat_entry(user_id, prompt_id, {
+            "prompt_status": "Failed",
+            "answer": f"Request failed: {str(exc)}",
+            "promptResponseText": f"Request failed: {str(exc)}",
+            "promptResponseTabularData": {"headers": [], "rows": []},
+            "has_tables": False,
+            "table_data": [],
+            "tables": [],
+        })
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -348,7 +488,7 @@ def ask_question():
 
 @app.route('/api/followup', methods=['POST'])
 def followup_question():
-    """Follow-up question endpoint"""
+    """Follow-up endpoint (async). Client must poll /api/updatestatus until terminal."""
     try:
         data = request.json or {}
         question = (data.get('question') or data.get('promptRequestText') or '').strip()
@@ -360,133 +500,25 @@ def followup_question():
         if not question:
             return jsonify(_prompt_error_response('Question is required', 400)), 400
 
-        session = get_session(user_id)
+        try:
+            _, root_prompt_id = _resolve_followup_context(user_id, referenced_prompt_id)
+        except ValueError as exc:
+            return jsonify(_prompt_error_response(str(exc), 404)), 404
 
-        # Prompt-service compatible follow-up:
-        # if promptId is provided, use that exact prompt as context root.
-        base_entry = None
-        if referenced_prompt_id:
-            for entry in session.get('chat_history', []):
-                if entry.get("prompt_id") == referenced_prompt_id:
-                    base_entry = entry
-                    break
-            if base_entry is None:
-                return jsonify(_prompt_error_response('Unknown promptId for userId', 404)), 404
+        prompt_id = _generate_prompt_id()
+        thinking_entry = _build_thinking_entry(
+            user_id,
+            username,
+            email,
+            question,
+            prompt_id,
+            original_prompt_id=root_prompt_id or prompt_id,
+            referenced_prompt_id=referenced_prompt_id or None,
+        )
+        _insert_chat_entry(user_id, thinking_entry)
+        PROMPT_WORKERS.submit(_complete_followup_prompt, user_id, prompt_id, question, referenced_prompt_id)
 
-        # Fallback to latest non-Arabic entry if promptId not supplied
-        if base_entry is not None:
-            prev_q = (
-                base_entry.get('question')
-                or base_entry.get('promptRequestText')
-                or ''
-            )
-            root_prompt_id = base_entry.get("original_prompt_id") or referenced_prompt_id
-        else:
-            prev_q = ''
-            root_prompt_id = None
-            for entry in session.get('chat_history', []):
-                if not entry.get('is_arabic') and entry.get('prompt_status') == 'Completed':
-                    prev_q = (
-                        entry.get('question')
-                        or entry.get('promptRequestText')
-                        or ''
-                    )
-                    break
-        combined = f"{prev_q} {question}".strip()
-
-        # Call ask endpoint logic
-        import time
-        start_t = time.perf_counter()
-        res = answer_with_refine_chain(combined)
-        elapsed = time.perf_counter() - start_t
-
-        # Get raw answer and exception section (same as ask endpoint)
-        answer = res.get("answer_text") or res.get("answer") or ""
-        exception_section = res.get("exception_section", "")
-
-        # Combine raw sections BEFORE formatting
-        if exception_section:
-            answer = answer.rstrip() + "\n\n" + exception_section
-
-        # Format the complete combined answer
-        if answer.strip().lower() != "sources not found.":
-            answer = format_visible_answer(answer)
-
-        stage_clean = {}
-        for k, v in (res.get("stage_answers") or {}).items():
-            vv = v if isinstance(v, str) else ""
-            vv = format_visible_answer(vv)
-            vv = remove_citations(vv)
-            stage_clean[k] = vv
-
-        display_sources = filter_page_zero_references(res["sources"])
-        if display_sources is None:
-            display_sources = []
-
-        sources_list = []
-        for doc in display_sources:
-            meta = _unify_metadata(getattr(doc, "metadata", {}) or {})
-            chunk_text = getattr(doc, "page_content", "") or ""
-            sources_list.append({
-                'doc_name': meta.get('doc_name', 'Document'),
-                'chapter': meta.get('chapter', '—'),
-                'chapter_name': meta.get('chapter_name', '—'),
-                'para_number': meta.get('para_number', '—'),
-                'header': meta.get('header', '—'),
-                'page': meta.get('page', 0),
-                'publisher': meta.get('publisher', '—'),
-                'excerpt': _make_excerpt(chunk_text, max_chars=900)
-            })
-
-        tables_payload = res.get("tables") or []
-        table_data = []
-        for idx, t in enumerate(tables_payload, start=1):
-            cols = t.get("columns") or []
-            rows = t.get("rows") or []
-            try:
-                df = pd.DataFrame(rows, columns=cols)
-            except Exception:
-                continue
-            df = df.fillna("").applymap(lambda v: "—" if str(v).strip() == "" else v)
-            table_data.append({
-                'index': idx,
-                'csv': df.to_csv(index=False),
-                'row_count': len(df),
-                'col_count': len(df.columns)
-            })
-        has_tables = len(table_data) > 0
-
-        chat_entry = {
-            "mode": "Answer from Database",
-            "kb": "IFRS A/B/C",
-            "user_id": user_id,
-            "username": username,
-            "email": email,
-            "question": combined,
-            "answer": answer,
-            "stage_answers": stage_clean,
-            "sources": sources_list,
-            "time_taken_sec": elapsed,
-            "has_tables": has_tables,
-            "table_data": table_data,
-            "tables": tables_payload,
-            "prompt_id": _generate_prompt_id(),
-            "original_prompt_id": root_prompt_id,
-            "referenced_prompt_id": referenced_prompt_id or None,
-            "prompt_status": "Completed",
-            "prompt_title": _derive_prompt_title(question),
-            "promptRequestText": answer,
-            "promptResponseText": answer,
-            "promptResponseTabularData": _first_tabular_data(tables_payload),
-            "is_arabic": False
-        }
-        if not chat_entry["original_prompt_id"]:
-            chat_entry["original_prompt_id"] = chat_entry["prompt_id"]
-
-        session['chat_history'].insert(0, chat_entry)
-        save_session(user_id, session)
-
-        return jsonify(_prompt_success_response(chat_entry)), 200
+        return jsonify(_prompt_success_response(thinking_entry)), 200
 
     except Exception as e:
         traceback.print_exc()
@@ -495,7 +527,7 @@ def followup_question():
 
 @app.route('/api/translate', methods=['POST'])
 def translate():
-    """Translate latest answer to Arabic"""
+    """Translate latest response to Arabic (async). Poll /api/updatestatus for completion."""
     try:
         data = request.json or {}
         user_id, username, email, err = _resolve_user_context(data, request.args)
@@ -514,43 +546,23 @@ def translate():
         if latest.get('prompt_status') == 'Thinking':
             return jsonify(_prompt_error_response('Cannot translate while response is still thinking', 400)), 400
 
-        # Translate
-        q_ar = translate_to_arabic(latest["question"])
-        a_ar = translate_to_arabic(latest["answer"])
+        prompt_id = _generate_prompt_id()
+        thinking_entry = _build_thinking_entry(
+            user_id,
+            username,
+            email,
+            latest.get("question", "Translate latest response"),
+            prompt_id,
+            prompt_title=_derive_prompt_title(f"Translate: {latest.get('prompt_title') or latest.get('question', '')}"),
+            mode=latest.get("mode", "Answer from Database"),
+            kb=latest.get("kb", "IFRS A/B/C"),
+            original_prompt_id=latest.get("original_prompt_id") or latest.get("prompt_id") or prompt_id,
+            referenced_prompt_id=latest.get("prompt_id"),
+        )
+        _insert_chat_entry(user_id, thinking_entry)
+        PROMPT_WORKERS.submit(_complete_translate_prompt, user_id, prompt_id)
 
-        q_ar = remove_citations(fix_citation_format(q_ar))
-        a_ar = remove_citations(fix_citation_format(a_ar))
-
-        # Create Arabic entry
-        arabic_entry = {
-            "mode": latest.get("mode", "Answer from Database"),
-            "kb": latest.get("kb", "IFRS A/B/C"),
-            "user_id": user_id,
-            "username": username,
-            "email": email,
-            "question": q_ar,
-            "answer": a_ar,
-            "sources": latest.get("sources", []),
-            "stage_answers": latest.get("stage_answers", {}),
-            "tables": latest.get("tables", []),
-            "table_data": latest.get("table_data", []),
-            "has_tables": latest.get("has_tables", False),
-            "prompt_id": latest.get("prompt_id"),
-            "original_prompt_id": latest.get("original_prompt_id"),
-            "referenced_prompt_id": latest.get("referenced_prompt_id"),
-            "prompt_status": latest.get("prompt_status", "Completed"),
-            "prompt_title": latest.get("prompt_title", _derive_prompt_title(q_ar)),
-            "promptRequestText": q_ar,
-            "promptResponseText": a_ar,
-            "promptResponseTabularData": latest.get("promptResponseTabularData", {"headers": [], "rows": []}),
-            "is_arabic": True,
-            "time_taken_sec": latest.get("time_taken_sec"),
-        }
-
-        session['chat_history'].insert(0, arabic_entry)
-        save_session(user_id, session)
-
-        return jsonify(_prompt_success_response(arabic_entry)), 200
+        return jsonify(_prompt_success_response(thinking_entry)), 200
 
     except Exception as e:
         traceback.print_exc()
