@@ -539,7 +539,9 @@ def translate():
         arabic_entry["promptResponseText"] = a_ar
         arabic_entry["is_arabic"] = True
 
-        session['chat_history'].insert(0, arabic_entry)
+        # Keep the same payload identity (ask/follow-up prompt) and only
+        # mutate translation-specific fields rather than creating a new record.
+        session['chat_history'][0] = arabic_entry
         save_session(user_id, session)
 
         return jsonify(_prompt_success_response(arabic_entry)), 200
